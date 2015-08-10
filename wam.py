@@ -7,7 +7,7 @@ import os
 import json
 import subprocess
 import logging
-from subprocess import CalledProcessError
+from subprocess import CalledProcessError, check_call
 from shutil import make_archive
 from random import choice
 from string import ascii_lowercase
@@ -17,36 +17,77 @@ from errno import ENOENT
 
 # TODO: Implement config parsing
 
-APPS_PATH = '/var/www/wam'
-STORE_PATH = os.path.join(APPS_PATH, 'wam.json')
-DATA_PATH = APPS_PATH
-EXT_PATH = os.path.join(DATA_PATH, 'ext')
-
 class WebAppManager:
     """
     Attributes:
 
-     * `apps`
+    * `config`
+    * `apps`
+    * `server`
+    * `cron`
+    * `data_path`
+    * `store_path`
+    * `ext_path`
     """
 
-    def __init__(self):
+    def __init__(self, config={}):
+        self.config = {
+            'data_path': '/var/www/wam'
+        }
+        self.config.update(config)
+
+        self.data_path = self.config['data_path']
+        self.store_path = os.path.join(self.data_path, 'wam.json')
+        self.ext_path = os.path.join(self.data_path, 'ext')
+
         self.apps = {}
         self.server = WebServer(self)
         self.cron = Cron(self)
+        self.logger = logging.getLogger('wam')
+        self._logger = self.logger
 
     def start(self):
-        data = []
-        try:
-            with open(STORE_PATH) as f:
-                data = json.load(f)
-        except IOError as e:
-            if e.errno != ENOENT:
-                raise
+        self.apps = self.load()['apps']
 
-        for app in data:
-            app['jobs'] = dict(
-                (j['id'], Job(manager=self, **j)) for j in app['jobs'])
-        self.apps = dict((a['id'], App(wam=self, **a)) for a in data)
+    def load(self):
+        # XXX
+        data = {'apps': {}}
+        try:
+            with open(self.store_path) as f:
+                data = json.load(f, object_hook=self._decode)
+            self._logger.debug('Loaded %s', data)
+        except FileNotFoundError:
+            pass
+        return data
+
+        #apps = data['apps']
+        #for app in apps.values():
+        #    app['jobs'] = dict(
+        #        (j['id'], Job(manager=self, **j)) for j in app['jobs'])
+        #return {i: App(wam=self, **a) for i, a in apps.items()}
+
+    def _encode(self, object):
+        if isinstance(object, set):
+            x = {'items': list(object)}
+        else:
+            try:
+                x = object.json()
+            except AttributeError:
+                # TODO bug report AttributeError in encode
+                raise TypeError()
+        x['__type__'] = type(object).__name__
+        return x
+
+    def _decode(self, json):
+        type = json.pop('__type__', None)
+        if type:
+            if type == 'set':
+                return set(json['items'])
+            else:
+                types = {'App': App, 'Job': Job}
+                return types[type](wam=self, **json)
+        else:
+            return json
 
     def add(self, software_id, url):
         """
@@ -55,9 +96,9 @@ class WebAppManager:
         an HTTP URL pointing to a webapp meta file
         """
 
-        logging.info('adding %s...', url)
+        self._logger.info('Adding %s', url)
         secret = randstr()
-        app = App(url, software_id, secret, {}, self)
+        app = App(url, software_id, secret, {}, {}, self)
         self.apps[app.id] = app
         mkdir(app.path)
         self.server.configure()
@@ -65,34 +106,57 @@ class WebAppManager:
 
         try:
             app.setup()
+            return app
         except CalledProcessError as e:
-            logger.error('app setup failed, rolling back')
+            self.logger.error('app setup failed, rolling back')
             self.remove(app)
-            return
+            raise
 
     def remove(self, app):
         # TODO: include app.backup()
-        logging.info('removing %s...', app.id)
+        self._logger.info('Removing %s', app.id)
         try:
             app.cleanup()
         except CalledProcessError as e:
-            logger.error('app cleanup failed, continuing removal')
+            self.logger.error('app cleanup failed, continuing removal')
         os.rename(app.path, '/tmp/wam.backup.{}'.format(randstr()))
         del self.apps[app.id]
         self.server.configure()
         self.store()
 
+    def json(self):
+        #return {'apps': {i: a.json() for i, a in self.apps.items()}}
+        return {'apps': self.apps}
+
     def store(self):
-        with open(STORE_PATH, 'w') as f:
-            json.dump([a.json() for a in self.apps.values()], f)
+        j = json.dumps(self.json(), default=self._encode)
+        self._logger.debug('Storing %s', j)
+        with open(self.store_path, 'w') as f:
+            #json.dump(j, f)
+            f.write(j)
 
 class App:
-    def __init__(self, id, software_id, secret, jobs, wam):
+    """Web applicaton.
+
+    Attributes:
+
+    * `id`
+    * `software_id`
+    * `secret`
+    * `installed_packages`
+    * `jobs`
+    * `manager`
+    """
+
+    def __init__(self, id, software_id, secret, jobs, installed_packages, wam):
         self.id = id
         self.software_id = software_id
         self.secret = secret
+        self.installed_packages = installed_packages
         self.jobs = jobs
         self.wam = wam
+        self.manager = wam
+        self._logger = logging.getLogger('wam')
         self._cookies = CookieJar()
 
     @property
@@ -101,7 +165,7 @@ class App:
 
     @property
     def path(self):
-        return os.path.join(APPS_PATH, self.sid)
+        return os.path.join(self.wam.config['data_path'], self.sid)
 
     @property
     def url(self):
@@ -116,11 +180,11 @@ class App:
     # FIXME: use app.sid for cert paths
     @property
     def certificate_path(self):
-        return os.path.join(DATA_PATH, 'ssl', self.id + '.crt')
+        return os.path.join(self.wam.config['data_path'], 'ssl', self.id + '.crt')
 
     @property
     def certificate_key_path(self):
-        return os.path.join(DATA_PATH, 'ssl', self.id + '.key')
+        return os.path.join(self.wam.config['data_path'], 'ssl', self.id + '.key')
 
     @property
     def encrypted(self):
@@ -143,7 +207,7 @@ openssl x509 -in $DOMAIN.crt -text
         # TODO is thre a python way to do this?
         call('openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out {}'.format(
             self.certificate_key_path))
-        csr_path = os.path.join(DATA_PATH, 'ssl', self.id + '.csr')
+        csr_path = os.path.join(self.wam.config['data_path'], 'ssl', self.id + '.csr')
         call('openssl req -new -key {} -subj / -out {}'.format(
             self.certificate_key_path, csr_path))
         # TODO: return what? better csr blob?
@@ -167,7 +231,7 @@ openssl x509 -in $DOMAIN.crt -text
     def backup(self):
         # TODO: app settings should also be backed up, so a wam app can be
         # restored just by selecting a .tar.gz file
-        logging.info('creating a backup of %s...', self.id)
+        self._logger.info('creating a backup of %s...', self.id)
         try:
             self._call('backup')
         except CalledProcessError as e:
@@ -175,41 +239,120 @@ openssl x509 -in $DOMAIN.crt -text
         # TODO: replace id with timestamp
         # TODO: other directory (e.g. var/www/wam/backup)?
         make_archive('/tmp/wam.backup.{}.{}'.format(self.sid, randstr()),
-                     'gztar', APPS_PATH, self.sid, verbose=2)
+                     'gztar', self.wam.config['data_path'], self.sid, verbose=2)
 
     def update(self):
         self.backup()
-        logging.info('updating %s...', self.id)
+        self._logger.info('updating %s...', self.id)
         self._call('update')
 
     def cleanup(self):
         self._call('cleanup')
+        self.uninstall_all()
 
     def schedule(self, cmd, time):
         job = Job(randstr(), cmd, time, self.wam)
         self.jobs[job.id] = job
         self.wam.cron.configure()
-        self.wam.store()
+        self.manager.store()
         return job
 
     def unschedule(self, job):
         del self.jobs[job.id]
         self.wam.cron.configure()
-        self.wam.store()
+        self.manager.store()
 
     def _call(self, op):
+        os.environ['WAM_DATA_PATH'] = self.manager.data_path
         os.environ['WAM_APP_ID'] = self.id
+        if self._logger.getEffectiveLevel() == logging.DEBUG:
+            os.environ['WAM_VERBOSE'] = '1'
+
         try:
-            call('./{} {}'.format(self.software_id, op))
-        #except CalledProcessError as e:
-        #    print('TODO: ROLLBACK')
-        #    raise
+            self._logger.debug('ENTERING SUBPROCESS for %s', op)
+            check_call([self.software_id, op])
+            #call('./{} {}'.format(self.software_id, op))
+            self._logger.debug('EXITING SUBPROCESS for %s', op)
+
+            # Reload all data that may be modified by app script
+            data = self.manager.load()
+            copy = data['apps'][self.id]
+            self.installed_packages = copy.installed_packages
+            for id in self.jobs.keys() - copy.jobs.keys():
+                self._logger.debug('Cron job %s removed by app script', id)
+                del self.jobs[id]
+            for id in copy.jobs.keys() - self.jobs.keys():
+                self._logger.debug('Cron job %s added by app script', id)
+                self.jobs[id] = copy.jobs[id]
+
+        except CalledProcessError as e:
+            print('TODO: ROLLBACK')
+            raise
         finally:
+            del os.environ['WAM_DATA_PATH']
             del os.environ['WAM_APP_ID']
+            os.environ.pop('WAM_VERBOSE', None)
+
+    def install(self, engine, packages={'auto'}):
+        """Install a set of `packages` with `engine`."""
+        self._logger.info('Installing %s', packages)
+        # TODO: validate packages somehow?
+        auto = 'auto' in packages
+        pkgs = list(packages - {'auto'})
+        if engine == 'system':
+            # ignore auto, not supported
+            if pkgs:
+                check_call(['sudo', 'apt-get', '-y', 'install'] + pkgs)
+        elif engine == 'bundler':
+            if auto:
+                check_call(['bundle', 'install', '--deployment'])
+            # TODO: Implement non-auto?
+        else:
+            raise ValueError('engine_unknown')
+
+        if engine not in self.installed_packages:
+            self.installed_packages[engine] = set()
+        self.installed_packages[engine] |= packages
+        self.manager.store()
+
+    def uninstall(self, engine, packages={'auto'}):
+        """Uninstall a set of `packages` with `engine`."""
+        # TODO: Implement and make this more suffisticated, so that app scripts
+        # cannot remove
+        # packages (at the moment it for example could install vim, then
+        # uninstall vim - and vim would be gone for good...)
+        return
+
+        self._logger.info('Uninstalling %s', packages)
+        if engine not in {'system', 'bundler'}:
+            raise ValueError('engine_unknown')
+        if not packages <= self.installed_packages.get(engine, {}):
+            raise ValueError('packages_not_installed')
+
+        auto = 'auto' in packages
+        pkgs = packages - {'auto'}
+        if engine == 'system':
+            if pkgs:
+                pass
+                #check_call(['apt-mark', 'auto'] + packages)
+                #check_call(['apt-get', 'autoremove'])
+        elif engine == 'bundler':
+            # TODO: ipmlement?
+            pass
+
+        self.installed_packages[engine] -= packages
+        self.manager.store()
+
+    def uninstall_all(self):
+        """Uninstall all packages that were installed for the app."""
+        #self._logger.info('Uninstalling all packages of the app')
+        for engine, packages in self.installed_packages.items():
+            self.uninstall(engine, packages)
+        # store() already called by uninstall()
 
     def create_db(self, engine):
         db = self._connect_db(engine)
-        logging.info('creating database...')
+        self._logger.info('creating database...')
         #sql = _create_db_template.format(name=self.id, pw=self.secret)
         c = db.cursor()
         # TODO why does this not work with ?
@@ -222,7 +365,7 @@ openssl x509 -in $DOMAIN.crt -text
     def delete_db(self, engine):
         # XXX TODO: backup to local dir
         db = self._connect_db(engine)
-        logging.info('deleting database...')
+        self._logger.info('deleting database...')
         c = db.cursor()
         if engine == 'mysql':
             from mysql.connector import OperationalError
@@ -263,7 +406,7 @@ openssl x509 -in $DOMAIN.crt -text
             os.path.join(self.path, '.git'), self.path))
 
     def request(self, url, data=None, search=None):
-        logging.info('requesting {}...'.format(url))
+        self._logger.info('requesting {}...'.format(url))
         #cookielib example
         opener = build_opener(
             HTTPCookieProcessor(self._cookies)
@@ -284,9 +427,15 @@ openssl x509 -in $DOMAIN.crt -text
 
     def json(self):
         json = dict(
-            (a, getattr(self, a)) for a in ['id', 'software_id', 'secret'])
-        json['jobs'] = [j.json() for j in self.jobs.values()]
+            (a, getattr(self, a)) for a
+            in ['id', 'software_id', 'secret', 'jobs', 'installed_packages'])
+        #json['jobs'] = [j.json() for j in self.jobs.values()]
+        #json['installed_packages'] = {e: list(p) for e, p
+        #                              in self.installed_packages.items()}
         return json
+
+#    def __repr__(self):
+#        return json.dumps(self, default=self.manager._encode)
 
 from http.cookiejar import CookieJar
 import urllib.request
@@ -300,9 +449,12 @@ class WebServer:
         self.wam = wam
 
     def configure(self):
-        logging.info('configuring Apache httpd...')
+        # TODO: implement nginx
+        return
+
+        self._logger.info('configuring Apache httpd...')
         hosts = []
-        for app in wam.apps.values():
+        for app in self.wam.apps.values():
             port = 80
             ssl = ''
             if app.encrypted:
@@ -376,6 +528,13 @@ class Object:
                 and k != 'manager')
 
 class Job(Object):
+    """Cron job.
+
+    Properties:
+
+    * `cmd`
+    * `time`
+    """
     def __init__(self, id, cmd, time, manager):
         self.id = id
         self.cmd = cmd
@@ -397,7 +556,7 @@ class ProtectApp:
 
     @property
     def htpasswd_path(self):
-        return os.path.join(EXT_PATH, 'protect/htpasswd')
+        return os.path.join(self.manager.ext_path, 'protect/htpasswd')
 
     def protect(self, pw):
         # FIXME: python way? no pw over commandline!!!!
@@ -414,27 +573,37 @@ def run_app_script():
     parser.add_argument('command', choices=['setup', 'backup', 'update', 'cleanup'])
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.DEBUG)
-    manager = WebAppManager()
+    level = logging.DEBUG if 'WAM_VERBOSE' in os.environ else logging.INFO
+    logging.basicConfig(level=level)
+
+    config = {}
+    data_path = os.environ.get('WAM_DATA_PATH')
+    if data_path:
+        config['data_path'] = data_path
+
+    manager = WebAppManager(config)
     manager.start()
 
     app_id = os.environ['WAM_APP_ID']
     app = manager.apps[app_id]
 
     script = sys.modules['__main__']
-    f = getattr(script, args.command)
-    f(app)
+    try:
+        f = getattr(script, args.command)
+        f(app)
+    except AttributeError:
+        pass
 
 def call(cmd):
     subprocess.check_call(cmd, shell=True)
 
 def randstr(length=16, charset=ascii_lowercase):
-    return ''.join(choice(charset) for i in xrange(length))
+    return ''.join(choice(charset) for i in range(length))
 
 # main
 
 if __name__ == '__main__':
-    # TODO: parse args, execute command
+    # TODO: parse args
     if os.getuid() != 33:
         print('run as www-data, please')
         sys.exit()
@@ -442,6 +611,8 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     wam = WebAppManager()
     wam.start()
+
+    # TODO exec command
 
     #app = wam.apps['humhub.inrain.org']
     #app.backup()
