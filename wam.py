@@ -4,13 +4,16 @@
 
 import sys
 import os
+import signal
 import json
 import subprocess
 import logging
-from subprocess import CalledProcessError, check_call
+import shlex
+from subprocess import Popen, CalledProcessError, check_call
 from shutil import make_archive
 from random import choice
 from string import ascii_lowercase
+from urllib.parse import urldefrag
 from re import sub
 from os import path, mkdir
 from errno import ENOENT
@@ -32,7 +35,10 @@ class WebAppManager:
 
     def __init__(self, config={}):
         self.config = {
-            'data_path': '/var/www/wam'
+            'data_path': 'data',
+            # TODO: dont even start with hardcoding again. implement config
+            # parsing
+            'email': 'sven.jms+app.wam@gmail.com' #None
         }
         self.config.update(config)
 
@@ -46,7 +52,24 @@ class WebAppManager:
         self.logger = logging.getLogger('wam')
         self._logger = self.logger
 
+        self._package_engines = {'apt': Apt(), 'bundler': Bundler()}
+        def get_redis_databases():
+            #for app in self.apps:
+            #    for database in app.databases:
+            #        if database.engine == 'redis':
+            #            return database
+            return {d for a in self.apps.values() for d in a.databases if d.engine == 'redis'}
+        self._database_engines = {
+            'postgresql': PostgreSQL(),
+            'redis': Redis(get_redis_databases)
+        }
+
     def start(self):
+        if self.data_path == 'data':
+            try:
+                os.mkdir(self.data_path)
+            except FileExistsError:
+                pass
         self.apps = self.load()['apps']
 
     def load(self):
@@ -55,7 +78,7 @@ class WebAppManager:
         try:
             with open(self.store_path) as f:
                 data = json.load(f, object_hook=self._decode)
-            self._logger.debug('Loaded %s', data)
+            #self._logger.debug('Loaded %s', data)
         except FileNotFoundError:
             pass
         return data
@@ -84,7 +107,7 @@ class WebAppManager:
             if type == 'set':
                 return set(json['items'])
             else:
-                types = {'App': App, 'Job': Job}
+                types = {'App': App, 'Database': Database, 'Job': Job}
                 return types[type](wam=self, **json)
         else:
             return json
@@ -98,7 +121,7 @@ class WebAppManager:
 
         self._logger.info('Adding %s', url)
         secret = randstr()
-        app = App(url, software_id, secret, {}, {}, self)
+        app = App(url, software_id, secret, {}, {}, set(), wam=self)
         self.apps[app.id] = app
         mkdir(app.path)
         self.server.configure()
@@ -110,6 +133,7 @@ class WebAppManager:
         except CalledProcessError as e:
             self.logger.error('app setup failed, rolling back')
             self.remove(app)
+            # TODO: raise reasonable error
             raise
 
     def remove(self, app):
@@ -129,8 +153,8 @@ class WebAppManager:
         return {'apps': self.apps}
 
     def store(self):
-        j = json.dumps(self.json(), default=self._encode)
-        self._logger.debug('Storing %s', j)
+        j = json.dumps(self.json(), default=self._encode, indent=4)
+        #self._logger.debug('Storing %s', j)
         with open(self.store_path, 'w') as f:
             #json.dump(j, f)
             f.write(j)
@@ -142,26 +166,44 @@ class App:
 
     * `id`
     * `software_id`
+    * `software_meta`: Description of the software as given in software's
+      `webapp.json`.
     * `secret`
     * `installed_packages`
+    * `databases`
+    * `data_dirs`
     * `jobs`
     * `manager`
     """
 
-    def __init__(self, id, software_id, secret, jobs, installed_packages, wam):
+    def __init__(self, id, software_id, secret, jobs, installed_packages,
+                 databases, wam, data_dirs=set(), pids=set()):
         self.id = id
         self.software_id = software_id
         self.secret = secret
         self.installed_packages = installed_packages
+        self.databases = databases
+        self.data_dirs = data_dirs
         self.jobs = jobs
+        self.pids = pids
+        self.job_user = 'www-data'
         self.wam = wam
         self.manager = wam
+
         self._logger = logging.getLogger('wam')
+        self._software_meta = None
         self._cookies = CookieJar()
 
     @property
     def sid(self):
         return sub('[\./]', '_', self.id)
+
+    @property
+    def software_meta(self):
+        if not self._software_meta:
+            with open(self.software_id.replace('py', 'json')) as f:
+                self._software_meta = json.load(f)
+        return self._software_meta
 
     @property
     def path(self):
@@ -176,6 +218,10 @@ class App:
         # TODO random user id
         # mysql user name max length 16
         return self.sid[:16]
+
+    @property
+    def is_running(self):
+        return bool(self.pids)
 
     # FIXME: use app.sid for cert paths
     @property
@@ -228,27 +274,131 @@ openssl x509 -in $DOMAIN.crt -text
         """
         self._call('setup')
 
+        self._update_data_dirs()
+
+        # TODO: should we really rollback if start fails? maybe a warning is the better option (i.e. handle neat exception)
+        self.start()
+
+    def _update_data_dirs(self):
+        data_dirs = set(self.software_meta.get('data_dirs', []))
+        new = data_dirs - self.data_dirs
+        old = self.data_dirs - data_dirs
+        for path in old:
+            self._logger.debug('Resetting data directory %s', path)
+            check_call([
+                'sudo', 'chown', '-R',
+                '{}:{}'.format(os.geteuid(), os.getegid()),
+                os.path.join(self.path, path)])
+            #chown(os.path.join(self.path, path), os.geteuid(), os.getegid())
+        for path in new:
+            self._logger.debug('Setting data directory %s', path)
+            path = os.path.join(self.path, path)
+            try:
+                mkdir(path)
+            except FileExistsError:
+                # That's okay
+                pass
+            check_call(['sudo', 'chown', '-R',
+                        '{}:{}'.format(self.job_user, self.job_user), path])
+            #from shutil import chown
+            #chown(path, self.job_user, self.job_user)
+        self.data_dirs = data_dirs
+        self.manager.store()
+
     def backup(self):
         # TODO: app settings should also be backed up, so a wam app can be
         # restored just by selecting a .tar.gz file
-        self._logger.info('creating a backup of %s...', self.id)
+        self._logger.info('Backing up %s', self.id)
+        running = self.is_running
+        if running:
+            self.stop()
+
+        from datetime import datetime
+        backup_path = os.path.join(
+            self.path, 'backup/backup-{}'.format(datetime.utcnow().isoformat()))
+        os.makedirs(backup_path)
+
         try:
             self._call('backup')
         except CalledProcessError as e:
             raise ValueError('user_script') # TODO: own error
+
+        # TODO: only backup datadirs and db
+        self._backup_all_databases(backup_path)
+
         # TODO: replace id with timestamp
         # TODO: other directory (e.g. var/www/wam/backup)?
-        make_archive('/tmp/wam.backup.{}.{}'.format(self.sid, randstr()),
-                     'gztar', self.wam.config['data_path'], self.sid, verbose=2)
+        #make_archive('/tmp/wam.backup.{}.{}'.format(self.sid, randstr()),
+        #             'gztar', self.wam.config['data_path'], self.sid, verbose=2)
+        if running:
+            self.start()
 
     def update(self):
+        self._logger.info('Updating %s', self.id)
+
+        running = self.is_running
+        if running:
+            self.stop()
         self.backup()
-        self._logger.info('updating %s...', self.id)
+
         self._call('update')
+        self._update_data_dirs()
+
+        if running:
+            self.start()
 
     def cleanup(self):
-        self._call('cleanup')
-        self.uninstall_all()
+        self.stop()
+        self._logger.info('Cleaning up %s', self.id)
+        try:
+            self._call('cleanup')
+        finally:
+            self.delete_all_databases()
+            self.uninstall_all()
+
+    def start(self):
+        if self.pids:
+            # this is a restart, good idea here?
+            self.stop()
+
+        self._logger.info('Starting %s', self.id)
+        self._call('start')
+
+    def stop(self):
+        self._logger.info('Stopping %s', self.id)
+        try:
+            self._call('stop')
+        finally:
+            self.stop_all_jobs()
+
+    def start_job(self, cmd, env={}, cwd=None):
+        args = shlex.split(cmd)
+        args = ['sudo', '-u', self.job_user] + args
+        envi = dict(os.environ)
+        envi.update(env)
+        #print(args)
+        #print(envi)
+        p = Popen(args, env=envi, cwd=cwd)
+        self.pids.add(p.pid)
+        self.manager.store()
+        return p.pid
+
+    def stop_job(self, job):
+        #try:
+        # dammit, sudo -u www-data geht nicht, weil sudo process von start_job
+        # als root laeuft.....
+        # ignore errors, assume process is already dead
+        subprocess.call(['sudo', 'kill', str(job)])
+        #    os.kill(job, signal.SIGTERM)
+        #except ProcessLookupError:
+        #    # it is already dead
+        #    pass
+        self.pids.remove(job)
+        self.manager.store()
+
+    def stop_all_jobs(self):
+        for pid in set(self.pids):
+            self.stop_job(pid)
 
     def schedule(self, cmd, time):
         job = Job(randstr(), cmd, time, self.wam)
@@ -263,21 +413,29 @@ openssl x509 -in $DOMAIN.crt -text
         self.manager.store()
 
     def _call(self, op):
-        os.environ['WAM_DATA_PATH'] = self.manager.data_path
-        os.environ['WAM_APP_ID'] = self.id
+        env = dict(os.environ)
+        env.update({
+            'WAM_SCRIPT': __file__,
+            'PYTHONPATH': os.path.dirname(__file__) or '.',
+            'WAM_DATA_PATH': self.manager.data_path,
+            'WAM_APP_ID': self.id
+        })
         if self._logger.getEffectiveLevel() == logging.DEBUG:
-            os.environ['WAM_VERBOSE'] = '1'
+            env['WAM_VERBOSE'] = '1'
 
         try:
-            self._logger.debug('ENTERING SUBPROCESS for %s', op)
-            check_call([self.software_id, op])
+            self._logger.debug('Calling %s %s', self.software_id, op)
+            check_call([self.software_id, op], env=env)
             #call('./{} {}'.format(self.software_id, op))
-            self._logger.debug('EXITING SUBPROCESS for %s', op)
+
+        finally:
+            self._logger.debug('%s %s exited', self.software_id, op)
 
             # Reload all data that may be modified by app script
             data = self.manager.load()
             copy = data['apps'][self.id]
             self.installed_packages = copy.installed_packages
+            self.databases = copy.databases
             for id in self.jobs.keys() - copy.jobs.keys():
                 self._logger.debug('Cron job %s removed by app script', id)
                 del self.jobs[id]
@@ -285,31 +443,13 @@ openssl x509 -in $DOMAIN.crt -text
                 self._logger.debug('Cron job %s added by app script', id)
                 self.jobs[id] = copy.jobs[id]
 
-        except CalledProcessError as e:
-            print('TODO: ROLLBACK')
-            raise
-        finally:
-            del os.environ['WAM_DATA_PATH']
-            del os.environ['WAM_APP_ID']
-            os.environ.pop('WAM_VERBOSE', None)
-
-    def install(self, engine, packages={'auto'}):
+    def install(self, engine, packages=set()):
         """Install a set of `packages` with `engine`."""
         self._logger.info('Installing %s', packages)
-        # TODO: validate packages somehow?
-        auto = 'auto' in packages
-        pkgs = list(packages - {'auto'})
-        if engine == 'system':
-            # ignore auto, not supported
-            if pkgs:
-                check_call(['sudo', 'apt-get', '-y', 'install'] + pkgs)
-        elif engine == 'bundler':
-            if auto:
-                check_call(['bundle', 'install', '--deployment'])
-            # TODO: Implement non-auto?
-        else:
+        # TODO: validate packages somehow? (otherwise may be command lines, bad...)
+        if engine not in self.manager._package_engines:
             raise ValueError('engine_unknown')
-
+        self.manager._package_engines[engine].install(packages, self)
         if engine not in self.installed_packages:
             self.installed_packages[engine] = set()
         self.installed_packages[engine] |= packages
@@ -350,43 +490,44 @@ openssl x509 -in $DOMAIN.crt -text
             self.uninstall(engine, packages)
         # store() already called by uninstall()
 
-    def create_db(self, engine):
-        db = self._connect_db(engine)
-        self._logger.info('creating database...')
-        #sql = _create_db_template.format(name=self.id, pw=self.secret)
+    def create_database(self, engine):
+        if engine not in self.manager._database_engines:
+            raise ValueError('engine_unknown')
+        self._logger.info('Creating database')
+        database = self.manager._database_engines[engine].create(
+            self.sid, self.dbuser, self.secret)
+        self.databases.add(database)
+        self.manager.store()
+        return database
+        """#sql = _create_db_template.format(name=self.id, pw=self.secret)
         c = db.cursor()
         # TODO why does this not work with ?
         c.execute('CREATE USER {}'.format(self.dbuser))
         c.execute('CREATE DATABASE {}'.format(self.sid))
         # mysql specific??
         c.execute("GRANT ALL ON {}.* TO {} IDENTIFIED BY '{}'".format(self.sid, self.dbuser, self.secret))
-        db.close()
+        db.close()"""
 
-    def delete_db(self, engine):
-        # XXX TODO: backup to local dir
-        db = self._connect_db(engine)
-        self._logger.info('deleting database...')
-        c = db.cursor()
-        if engine == 'mysql':
-            from mysql.connector import OperationalError
-        try:
-            user = self.sid[:16]
-            c.execute('DROP USER {}'.format(self.dbuser))
-        except OperationalError as e:
-            # user does not exist, ignore
-            pass
-        c.execute('DROP DATABASE IF EXISTS {}'.format(self.sid))
-        db.close()
+    def delete_database(self, database):
+        self.backup_database(database)
+        self._logger.info('Deleting database')
+        self.manager._database_engines[database.engine].delete(database)
+        self.databases.remove(database)
+        self.manager.store()
 
-    def backup_db(self, engine):
-        if engine == 'mysql':
-            call('mysqldump -u {} -p{} {} > {}'.format(
-                self.dbuser, self.secret, self.sid,
-                os.path.join(self.path, 'dump.sql')))
-        else:
-            raise ValueError('engine_unknown')
+    def delete_all_databases(self):
+        for database in set(self.databases):
+            self.delete_database(database)
 
-    def _connect_db(self, engine):
+    def backup_database(self, database, path):
+        self._logger.info('Backing up database %s', database.engine)
+        self.manager._database_engines[database.engine].dump(database, path)
+
+    def _backup_all_databases(self, path):
+        for db in self.databases:
+            self.backup_database(db, path)
+
+    """def _connect_db(self, engine):
         if engine == 'mysql':
             #from getpass import getpass
             #print('please enter MySQL root password')
@@ -396,10 +537,16 @@ openssl x509 -in $DOMAIN.crt -text
                                    password=self.config['mysql_password'])
         else:
             raise ValueError('engine_unknown')
-        return db
+        return db"""
 
     def clone(self, url):
-        call('git clone {} {}'.format(url, self.path))
+        """Clone a (git) repository into app path."""
+        url, branch = urldefrag(url)
+        cmd = ['git', 'clone', '--single-branch']
+        if branch:
+            cmd += ['-b', branch]
+        cmd += [url, self.path]
+        check_call(cmd)
 
     def pull(self):
         call('GIT_DIR={} GIT_WORK_TREE={} git pull'.format(
@@ -426,9 +573,9 @@ openssl x509 -in $DOMAIN.crt -text
         return None
 
     def json(self):
-        json = dict(
-            (a, getattr(self, a)) for a
-            in ['id', 'software_id', 'secret', 'jobs', 'installed_packages'])
+        attrs = ['id', 'software_id', 'secret', 'jobs', 'databases',
+                 'installed_packages', 'pids']
+        json = {a: getattr(self, a) for a in attrs}
         #json['jobs'] = [j.json() for j in self.jobs.values()]
         #json['installed_packages'] = {e: list(p) for e, p
         #                              in self.installed_packages.items()}
@@ -504,6 +651,134 @@ SERVER_PW_TEMPLATE = """\
     </Directory>
 """
 
+class PackageEngine:
+    def install(self, packages, app):
+        """Install a set of `packages` for `app`."""
+        raise NotImplementedError()
+
+    def uninstall(self, packages, app):
+        """Uninstall a set of `packages` for `app`."""
+        raise NotImplementedError()
+
+class Apt(PackageEngine):
+    def install(self, packages, app):
+        if not packages:
+            # Ignore auto
+            return
+        check_call(['sudo', 'apt-get', '-y', 'install'] + list(packages))
+
+class Bundler(PackageEngine):
+    def install(self, packages, app):
+        if packages:
+            # Implement?
+            raise NotImplementedError()
+        # TODO: set path to app somehow here!!
+        check_call(['bundle', 'install', '--gemfile',
+                    os.path.join(app.path, 'Gemfile')])#, '--deployment'])
+
+class DatabaseEngine:
+    id = None
+
+    def connect(self):
+        raise NotImplementedError()
+
+    def create(self, name, user, secret):
+        db = self.connect()
+        # Some databases (e.g. PostgreSQL) don't like CREATE statements in
+        # transactions
+        db.autocommit = True
+        c = db.cursor()
+        c.execute('CREATE DATABASE {}'.format(name))
+        c.execute("CREATE USER {} PASSWORD '{}'".format(user, secret))
+        # TODO: mysql ON {}.* ??
+        # TODO: mysql IDENTIFIED BY '{}' ??
+        c.execute('GRANT ALL ON DATABASE {} TO {}'.format(name, user))
+        db.close()
+        return Database(self.id, name, user, secret)
+
+    def delete(self, database):
+        db = self.connect()
+        # See create()
+        db.autocommit = True
+        c = db.cursor()
+        c.execute('DROP DATABASE IF EXISTS {}'.format(database.name))
+        try:
+            # mysql has no IF EXISTS or something...
+            c.execute('DROP USER {}'.format(database.user))
+        except:
+            # user (most likely) does not exist, ignore
+            pass
+        db.close()
+
+    def dump(self, database, path):
+        raise NotImplementedError()
+
+class PostgreSQL(DatabaseEngine):
+    id = 'postgresql'
+
+    def connect(self):
+        import psycopg2
+        db = psycopg2.connect(database='postgres')
+        return db
+
+    def dump(self, database, path):
+        with open(os.path.join(path, 'postgresql.sql'), 'w') as f:
+            check_call(['pg_dump', database.name], stdout=f)
+
+class MySQL(DatabaseEngine):
+    # TODO
+    def connect(self):
+        # TODO: test
+        import mysql.connector
+        db = mysql.connector.connect(user='root',
+                                     password=self.config['mysql_password'])
+        return db
+
+    def dump(self, name, path):
+        # TODO: test
+        with open(os.path.join(path, 'mysql.sql'), 'w') as f:
+            check_call(['mysqldump', '-u', 'root', '-p' + self.config['mysql_password'], name], stdout=f)
+            #call('mysqldump -u {} -p{} {} > {}'.format(
+            #    self.dbuser, self.secret, self.sid,
+            #    os.path.join(self.path, 'dump.sql')))
+
+class Redis(DatabaseEngine):
+    id = 'redis'
+
+    def __init__(self, get_redis_databases):
+        super().__init__()
+        self.get_redis_databases = get_redis_databases
+
+    def create(self, name, user, secret):
+        taken = {int(d.name) for d in self.get_redis_databases()}
+        free = set(range(8, 15)) - taken
+        if not free:
+            # TODO: what to do here?
+            raise ValueError()
+        # TODO: order somehow?
+        return Database(self.id, free.pop(), user, secret)
+
+    def delete(self, database):
+        # NOTE: we could flush the db
+        pass
+
+    def dump(self, database, path):
+        return
+        # TODO: just dummy hack, implement
+        with open(os.path.join(path, 'postgresql.sql'), 'w') as f:
+            f.write('foo\n')
+
+class Database:
+    def __init__(self, engine, name, user, secret, wam=None):
+        # TODO: wam is not needed, hack for json loading, what to do here?
+        self.engine = engine
+        self.name = name
+        self.user = user
+        self.secret = secret
+
+    def json(self):
+        return vars(self)
+
 CRON_CONFIG_PATH = '/etc/cron.d/wam'
 
 class Cron:
@@ -570,7 +845,9 @@ from argparse import ArgumentParser
 
 def run_app_script():
     parser = ArgumentParser()
-    parser.add_argument('command', choices=['setup', 'backup', 'update', 'cleanup'])
+    parser.add_argument(
+        'command',
+        choices=['setup', 'backup', 'update', 'cleanup', 'start', 'stop'])
     args = parser.parse_args()
 
     level = logging.DEBUG if 'WAM_VERBOSE' in os.environ else logging.INFO
@@ -590,9 +867,9 @@ def run_app_script():
     script = sys.modules['__main__']
     try:
         f = getattr(script, args.command)
-        f(app)
     except AttributeError:
-        pass
+        return
+    f(app)
 
 def call(cmd):
     subprocess.check_call(cmd, shell=True)
@@ -604,13 +881,53 @@ def randstr(length=16, charset=ascii_lowercase):
 
 if __name__ == '__main__':
     # TODO: parse args
-    if os.getuid() != 33:
-        print('run as www-data, please')
-        sys.exit()
+    #if os.getuid() != 33:
+    #    print('run as www-data, please')
+    #    sys.exit()
 
-    logging.basicConfig(level=logging.DEBUG)
-    wam = WebAppManager()
-    wam.start()
+    parser = ArgumentParser()
+    #parser.add_argument('command', choices=['add', 'remove'])
+    parser.add_argument('-v', '--verbose', action='store_true')
+    subparsers = parser.add_subparsers(dest='cmd')
+    add_cmd = subparsers.add_parser('add')
+    add_cmd.add_argument('software_id')
+    add_cmd.add_argument('url')
+    remove_cmd = subparsers.add_parser('remove')
+    remove_cmd.add_argument('app_id')
+    app_start_cmd = subparsers.add_parser('app-start')
+    app_start_cmd.add_argument('app_id')
+    app_stop_cmd = subparsers.add_parser('app-stop')
+    app_stop_cmd.add_argument('app_id')
+    app_update_cmd = subparsers.add_parser('app-update')
+    app_update_cmd.add_argument('app_id')
+    app_backup_cmd = subparsers.add_parser('app-backup')
+    app_backup_cmd.add_argument('app_id')
+    args = parser.parse_args()
+    #print(args)
+
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=level)
+
+    manager = WebAppManager()
+    manager.start()
+
+    if args.cmd == 'add':
+        manager.add(args.software_id, args.url)
+    elif args.cmd == 'remove':
+        app = manager.apps[args.app_id]
+        manager.remove(app)
+    elif args.cmd == 'app-start':
+        app = manager.apps[args.app_id]
+        app.start()
+    elif args.cmd == 'app-stop':
+        app = manager.apps[args.app_id]
+        app.stop()
+    elif args.cmd == 'app-backup':
+        app = manager.apps[args.app_id]
+        app.backup()
+    elif args.cmd == 'app-update':
+        app = manager.apps[args.app_id]
+        app.update()
 
     # TODO exec command
 
