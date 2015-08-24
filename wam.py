@@ -112,7 +112,7 @@ class WebAppManager:
         else:
             return json
 
-    def add(self, software_id, url):
+    def add(self, software_id, url, rollback=True):
         """
         add / activate instance of app at url.
         `app_id` is an identifier, either known to system or an webapp meta file or
@@ -130,9 +130,11 @@ class WebAppManager:
         try:
             app.setup()
             return app
-        except CalledProcessError as e:
-            self.logger.error('app setup failed, rolling back')
-            self.remove(app)
+        except ScriptError:
+            self.logger.error('app setup failed')
+            if rollback:
+                self.logger.info('Rolling back %s', app.id)
+                self.remove(app)
             # TODO: raise reasonable error
             raise
 
@@ -141,7 +143,7 @@ class WebAppManager:
         self._logger.info('Removing %s', app.id)
         try:
             app.cleanup()
-        except CalledProcessError as e:
+        except ScriptError:
             self.logger.error('app cleanup failed, continuing removal')
         os.rename(app.path, '/tmp/wam.backup.{}'.format(randstr()))
         del self.apps[app.id]
@@ -473,6 +475,9 @@ openssl x509 -in $DOMAIN.crt -text
             check_call([script, op], env=env)
             #call('./{} {}'.format(self.software_id, op))
 
+        except (FileNotFoundError, CalledProcessError):
+            raise ScriptError()
+
         finally:
             self._logger.debug('%s %s exited', self.software_id, op)
 
@@ -494,7 +499,7 @@ openssl x509 -in $DOMAIN.crt -text
         # TODO: validate packages somehow? (otherwise may be command lines, bad...)
         if engine not in self.manager._package_engines:
             raise ValueError('engine_unknown')
-        self.manager._package_engines[engine].install(packages, self)
+        self.manager._package_engines[engine].install(packages, self.path)
         if engine not in self.installed_packages:
             self.installed_packages[engine] = set()
         self.installed_packages[engine] |= packages
@@ -699,35 +704,32 @@ SERVER_PW_TEMPLATE = """\
 """
 
 class PackageEngine:
-    def install(self, packages, app):
-        """Install a set of `packages` for `app`."""
+    def install(self, packages, app_path):
+        """Install a set of `packages` for the app located at `app_path`."""
         raise NotImplementedError()
 
-    def uninstall(self, packages, app):
-        """Uninstall a set of `packages` for `app`."""
+    def uninstall(self, packages, app_path):
+        """Uninstall a set of `packages` for the app located at `app_path`."""
         raise NotImplementedError()
 
 class Apt(PackageEngine):
-    def install(self, packages, app):
+    def install(self, packages, app_path):
         if not packages:
             # Ignore auto
             return
         check_call(['sudo', 'apt-get', '-qy', 'install'] + list(packages))
 
 class Bundler(PackageEngine):
-    def install(self, packages, app):
+    def install(self, packages, app_path):
         if packages:
             # Implement?
             raise NotImplementedError()
         # TODO: set path to app somehow here!!
         check_call(['bundle', 'install', '--gemfile',
-                    os.path.join(app.path, 'Gemfile')])#, '--deployment'])
+                    os.path.join(app_path, 'Gemfile')])#, '--deployment'])
 
 class Bower(PackageEngine):
-    def install(self, packages, app):
-        # TODO: remove app, just use app_path
-        app_path = app.path
-
+    def install(self, packages, app_path):
         if packages:
             # Implement?
             raise NotImplementedError()
@@ -876,6 +878,9 @@ class Job(Object):
         self.time = time
         self.manager = manager
 
+class ScriptError(Exception):
+    pass
+
 # setup
 # sudo -u www-data mkdir ext/protect
 # TODO: vllt uebetrieben, einfach nur ProtectExtension, mit protect(app) reicht
@@ -952,6 +957,7 @@ if __name__ == '__main__':
     add_cmd = subparsers.add_parser('add')
     add_cmd.add_argument('software_id')
     add_cmd.add_argument('url')
+    add_cmd.add_argument('--no-rollback', dest='rollback', action='store_false')
     remove_cmd = subparsers.add_parser('remove')
     remove_cmd.add_argument('app_id')
     app_start_cmd = subparsers.add_parser('app-start')
@@ -972,7 +978,7 @@ if __name__ == '__main__':
     manager.start()
 
     if args.cmd == 'add':
-        manager.add(args.software_id, args.url)
+        manager.add(args.software_id, args.url, rollback=args.rollback)
     elif args.cmd == 'remove':
         app = manager.apps[args.app_id]
         manager.remove(app)
