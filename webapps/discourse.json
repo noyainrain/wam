@@ -1,4 +1,4 @@
 {
     "data_dirs": ["log", "public/uploads", "tmp"],
-    "script": "discourse.py"
+    "hooks": "discourse.py"
 }

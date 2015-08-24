@@ -52,7 +52,7 @@ class WebAppManager:
         self.logger = logging.getLogger('wam')
         self._logger = self.logger
 
-        self._package_engines = {'apt': Apt(), 'bundler': Bundler()}
+        self._package_engines = {'apt': Apt(), 'bundler': Bundler(), 'bower': Bower()}
         def get_redis_databases():
             #for app in self.apps:
             #    for database in app.databases:
@@ -201,9 +201,13 @@ class App:
     @property
     def software_meta(self):
         if not self._software_meta:
-            with open(self.software_id.replace('py', 'json')) as f:
+            with open(self.software_id) as f:
                 self._software_meta = json.load(f)
+            self._software_meta['jobs'] = list(
+                {'cmd': j} if isinstance(j, str) else j for j in
+                self._software_meta.get('jobs', []))
         return self._software_meta
+    meta=software_meta
 
     @property
     def path(self):
@@ -235,6 +239,12 @@ class App:
     @property
     def encrypted(self):
         return os.path.isfile(self.certificate_path)
+
+    @property
+    def data(self):
+        return {
+            'path': self.path
+        }
 
     def encrypt(self):
         """
@@ -274,10 +284,30 @@ openssl x509 -in $DOMAIN.crt -text
         """
         self._call('setup')
 
+        self._update_code()
+        self._update_packages()
+        self._update_databases()
         self._update_data_dirs()
 
         # TODO: should we really rollback if start fails? maybe a warning is the better option (i.e. handle neat exception)
         self.start()
+
+    def _update_code(self):
+        try:
+            url = self.meta['download']
+        except KeyError:
+            return
+        self.clone(url)
+
+    def _update_packages(self):
+        packages_meta = self.meta.get('packages', {})
+        for engine, packages in packages_meta.items():
+            self.install(engine, set(packages))
+
+    def _update_databases(self):
+        databases = self.meta.get('databases', [])
+        for database in databases:
+            self.create_database(database)
 
     def _update_data_dirs(self):
         data_dirs = set(self.software_meta.get('data_dirs', []))
@@ -348,8 +378,10 @@ openssl x509 -in $DOMAIN.crt -text
             self.start()
 
     def cleanup(self):
-        self.stop()
         self._logger.info('Cleaning up %s', self.id)
+        self.stop()
+        self.backup()
+
         try:
             self._call('cleanup')
         finally:
@@ -357,11 +389,19 @@ openssl x509 -in $DOMAIN.crt -text
             self.uninstall_all()
 
     def start(self):
+        self._logger.info('Starting %s', self.id)
         if self.pids:
             # this is a restart, good idea here?
             self.stop()
 
-        self._logger.info('Starting %s', self.id)
+        jobs = self.meta['jobs']
+        for job in jobs:
+            cmd = job['cmd'].format(**self.data)
+            cwd = job.get('cwd')
+            if cwd:
+                cwd = cwd.format(**self.data)
+            self.start_job(cmd, cwd=cwd)
+
         self._call('start')
 
     def stop(self):
@@ -413,6 +453,11 @@ openssl x509 -in $DOMAIN.crt -text
         self.manager.store()
 
     def _call(self, op):
+        try:
+            script = os.path.join(os.path.dirname(self.software_id), self.meta['hooks'])
+        except KeyError:
+            return
+
         env = dict(os.environ)
         env.update({
             'WAM_SCRIPT': __file__,
@@ -424,8 +469,8 @@ openssl x509 -in $DOMAIN.crt -text
             env['WAM_VERBOSE'] = '1'
 
         try:
-            self._logger.debug('Calling %s %s', self.software_id, op)
-            check_call([self.software_id, op], env=env)
+            self._logger.debug('Calling %s %s', script, op)
+            check_call([script, op], env=env)
             #call('./{} {}'.format(self.software_id, op))
 
         finally:
@@ -509,8 +554,9 @@ openssl x509 -in $DOMAIN.crt -text
         db.close()"""
 
     def delete_database(self, database):
-        self.backup_database(database)
         self._logger.info('Deleting database')
+        # we only do complete app backups
+        #self.backup_database(database)
         self.manager._database_engines[database.engine].delete(database)
         self.databases.remove(database)
         self.manager.store()
@@ -541,8 +587,9 @@ openssl x509 -in $DOMAIN.crt -text
 
     def clone(self, url):
         """Clone a (git) repository into app path."""
+        self._logger.info('Cloning %s', url)
         url, branch = urldefrag(url)
-        cmd = ['git', 'clone', '--single-branch']
+        cmd = ['git', 'clone', '-q', '--single-branch']
         if branch:
             cmd += ['-b', branch]
         cmd += [url, self.path]
@@ -665,7 +712,7 @@ class Apt(PackageEngine):
         if not packages:
             # Ignore auto
             return
-        check_call(['sudo', 'apt-get', '-y', 'install'] + list(packages))
+        check_call(['sudo', 'apt-get', '-qy', 'install'] + list(packages))
 
 class Bundler(PackageEngine):
     def install(self, packages, app):
@@ -675,6 +722,19 @@ class Bundler(PackageEngine):
         # TODO: set path to app somehow here!!
         check_call(['bundle', 'install', '--gemfile',
                     os.path.join(app.path, 'Gemfile')])#, '--deployment'])
+
+class Bower(PackageEngine):
+    def install(self, packages, app):
+        # TODO: remove app, just use app_path
+        app_path = app.path
+
+        if packages:
+            # Implement?
+            raise NotImplementedError()
+        else:
+            # maybe use update instead of install here?
+            check_call(
+                ['bower', '--config.cwd=' + app_path, '--config.interactive=false', 'install'])
 
 class DatabaseEngine:
     id = None

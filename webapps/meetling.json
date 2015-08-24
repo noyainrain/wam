@@ -1,0 +1,9 @@
+{
+    "download": "https://github.com/NoyaInRain/agenda.git",
+    "packages": {
+        "apt": ["python3-tornado"],
+        "bower": []
+    },
+    "databases": ["redis"],
+    "jobs": [{"cmd": "./runagenda.py", "cwd": "{path}"}]
+}

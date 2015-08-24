@@ -4,20 +4,21 @@
 
 import os
 import json
-from tempfile import mkdtemp
+from tempfile import NamedTemporaryFile, mkdtemp
+from contextlib import contextmanager
 from shutil import copyfile
 from unittest import TestCase
-from wam import WebAppManager, Apt, Bundler, PostgreSQL, Database
+from wam import WebAppManager, Apt, Bundler, Bower, PostgreSQL, Database
+
+RES_PATH = os.path.join(os.path.dirname(__file__), 'res')
 
 class WamTestCase(TestCase):
-    res_path = os.path.join(os.path.dirname(__file__), 'res')
-
     def setUp(self):
         d = mkdtemp()
         #print(d)
         self.manager = WebAppManager({'data_path': d})
         self.manager.start()
-        self.app = self.manager.add('res/test.py', 'localhost')
+        self.app = self.manager.add('res/test.json', 'localhost')
 
 def process_exists(pid):
     try:
@@ -42,9 +43,16 @@ class AppTest(WamTestCase):
     #    #self.app.clone('https://github.com/NoyaInRain/wam.git#master')
     #    self.app.clone('.#master')
 
-    def test_install(self):
-        self.app.install('apt', {'python3-yapsy'})
-        self.assertIn('python3-yapsy', self.app.installed_packages['apt'])
+    def test_start_stop(self):
+        meta = {'jobs': ['sleep 42']}
+        with self.tmp_app(meta) as app:
+            app.start()
+            self.assertTrue(app.pids)
+            job = list(app.pids)[0]
+            self.assertTrue(process_exists(job))
+            app.stop()
+            self.assertFalse(app.pids)
+            #self.assertFalse(process_exists(job))
 
     def test_start_job(self):
         job = self.app.start_job('sleep 42')
@@ -67,13 +75,42 @@ class AppTest(WamTestCase):
         self.app.stop_all_jobs()
         self.assertFalse(self.app.pids)
 
-    def test_setup(self):
-        dirs = {'a': 33, 'b': 33}
+    def test_setup_code(self):
+        with self.tmp_app({'name': 'test', 'download': '.'}) as app:
+            self.assertTrue(os.path.isfile(os.path.join(app.path, 'wam.py')))
 
-        app = self.manager.add('res/test.py', 'localhoax')
-        self.assertEqual(app.data_dirs, {'a', 'b'})
-        for path, uid in dirs.items():
-            self.assertEqual(os.stat(os.path.join(app.path, path)).st_uid, uid)
+    #def test_install(self):
+    #    self.app.install('apt', {'python3-yapsy'})
+    #    self.assertIn('python3-yapsy', self.app.installed_packages['apt'])
+
+    def test_setup_packages(self):
+        meta = {
+            'name': 'test',
+            'packages': {
+                'apt': ['python3-yapsy']
+            }
+        }
+        with self.tmp_app(meta) as app:
+            self.assertIn('python3-yapsy', app.installed_packages['apt'])
+
+    def test_setup_databases(self):
+        meta = {
+            'name': 'test',
+            'databases': ['postgresql']
+        }
+        with self.tmp_app(meta) as app:
+            self.assertTrue(app.databases)
+            self.assertEqual(list(app.databases)[0].engine, 'postgresql')
+
+    def test_setup_data_dirs(self):
+        dirs = {'a': 33, 'b': 33}
+        meta = {
+            "data_dirs": ["a", "b"]
+        }
+        with self.tmp_app(meta) as app:
+            self.assertEqual(app.data_dirs, {'a', 'b'})
+            for path, uid in dirs.items():
+                self.assertEqual(os.stat(os.path.join(app.path, path)).st_uid, uid)
 
     def test_update_data_dirs_changed(self):
         # XXX what an ugly hack... please add a cool way to update software meta
@@ -86,6 +123,22 @@ class AppTest(WamTestCase):
         for path, uid in dirs.items():
             self.assertEqual(os.stat(os.path.join(self.app.path, path)).st_uid,
                              uid)
+
+    @contextmanager
+    def tmp_app(self, meta):
+        with tmp_software(meta) as software_id:
+            app = self.manager.add(software_id, 'localhoax')
+            try:
+                yield app
+            finally:
+                self.manager.remove(app)
+
+@contextmanager
+def tmp_software(meta):
+    with NamedTemporaryFile(mode='w') as f:
+        json.dump(meta, f)
+        f.flush()
+        yield f.name
 
 class AppDatabaseTest(WamTestCase):
     def setUp(self):
@@ -127,10 +180,18 @@ class AptTest(WamTestCase):
 
 class BundlerTest(WamTestCase):
     def test_install(self):
-        copyfile(os.path.join(self.res_path, 'Gemfile'),
-                 os.path.join(self.app.path, 'Gemfile'))
+        copyfile(os.path.join(RES_PATH, 'Gemfile'), os.path.join(self.app.path, 'Gemfile'))
         bundler = Bundler()
         bundler.install({}, self.app)
+
+class BowerTest(WamTestCase):
+    def test_install(self):
+        #app_path = mkdtemp()
+        app_path = self.app.path
+        copyfile(os.path.join(RES_PATH, 'bower.json'), os.path.join(app_path, 'bower.json'))
+        bower = Bower()
+        bower.install({}, self.app)
+        self.assertTrue(os.path.isdir(os.path.join(app_path, 'bower_components/jquery')))
 
 class DatabaseEngineTestMixin:
     def setUp(self, engine):
