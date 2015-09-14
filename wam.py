@@ -801,8 +801,8 @@ class Bower(PackageEngine):
             raise NotImplementedError()
         else:
             # maybe use update instead of install here?
-            check_call(
-                ['bower', '--config.cwd=' + app_path, '--config.interactive=false', 'install'])
+            # Change working directory, otherwise .bowerrc is not taken into account
+            check_call(['bower', '--config.interactive=false', 'install'], cwd=app_path)
 
 class DatabaseEngine:
     id = None

@@ -1,9 +1,9 @@
 {
-    "download": "https://github.com/NoyaInRain/agenda.git",
+    "download": "https://github.com/NoyaInRain/meetling.git",
     "packages": {
         "apt": ["python3-tornado"],
         "bower": []
     },
     "databases": ["redis"],
-    "jobs": [{"cmd": "python3 -m meetling", "cwd": "{path}"}]
+    "jobs": [{"cmd": "python3 -m meetling --port {port}", "cwd": "{path}"}]
 }
