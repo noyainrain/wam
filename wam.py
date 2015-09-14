@@ -377,7 +377,8 @@ openssl x509 -in $DOMAIN.crt -text
                         .decode().strip())
         except CalledProcessError:
             git_root = None
-        repo_exists = (git_root == self.path)
+        # git_root is always absolute, self.path may or may not be
+        repo_exists = (git_root == os.path.abspath(self.path))
 
         if not repo_exists:
             self._logger.info('Cloning from %s', url)
