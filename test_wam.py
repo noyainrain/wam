@@ -4,8 +4,8 @@
 
 import os
 import json
-from tempfile import NamedTemporaryFile, mkdtemp
-from subprocess import CalledProcessError
+from tempfile import NamedTemporaryFile, mkdtemp, mktemp
+from subprocess import CalledProcessError, call, check_call
 from contextlib import contextmanager
 from shutil import copyfile
 from unittest import TestCase
@@ -14,15 +14,26 @@ from wam import WebAppManager, Apt, Bundler, Bower, PostgreSQL, Database, Script
 RES_PATH = os.path.join(os.path.dirname(__file__), 'res')
 
 class WamTestCase(TestCase):
-    def setUp(self):
-        d = mkdtemp()
+    def setUp(self, **args):
+        d = mktemp()
         #print(d)
-        self.manager = WebAppManager({'data_path': d})
+        #os.mkdir(d)
+        #d = mkdtemp()
+        config = {'data_path': d}
+        args.setdefault('nginx_config_path', '/tmp/wam.conf')
+
+        self.manager = WebAppManager(config=config, **args)
         self.manager.start()
 
     def tearDown(self):
         for app in list(self.manager.apps.values()):
             self.manager.remove(app)
+
+    @contextmanager
+    def tmp_app(self, meta={}):
+        with tmp_software(meta) as software_id:
+            app = self.manager.add(software_id, 'localhoax')
+            yield app
 
 def process_exists(pid):
     try:
@@ -37,7 +48,9 @@ def process_exists(pid):
 
 class WebAppManagerTest(WamTestCase):
     def test_add(self):
-        pass
+        with tmp_software({}) as software_id:
+            app = self.manager.add(software_id, 'localhost')
+            self.assertTrue(self.manager.port_range[0] <= app.port <= self.manager.port_range[1])
 
     def test_add_script_broken(self):
         with tmp_software({'hooks': '/bin/false'}) as software_id:
@@ -99,15 +112,20 @@ class AppTest(WamTestCase):
         self.app.stop_all_jobs()
         self.assertFalse(self.app.pids)
 
-    def test_setup_code(self):
-        with self.tmp_app({'name': 'test', 'download': '.'}) as app:
+    def test_update_code(self):
+        with self.tmp_app({'download': '.'}) as app:
             self.assertTrue(os.path.isfile(os.path.join(app.path, 'wam.py')))
+
+    def test_update_code_repo_exists(self):
+        with self.tmp_app({'download': '.'}) as app:
+            # NOTE: better test would be to commit something and then test if it is fetched
+            app.update()
 
     #def test_install(self):
     #    self.app.install('apt', {'python3-yapsy'})
     #    self.assertIn('python3-yapsy', self.app.installed_packages['apt'])
 
-    def test_setup_packages(self):
+    def test_update_packages(self):
         meta = {
             'name': 'test',
             'packages': {
@@ -117,16 +135,12 @@ class AppTest(WamTestCase):
         with self.tmp_app(meta) as app:
             self.assertIn('python3-yapsy', app.installed_packages['apt'])
 
-    def test_setup_databases(self):
-        meta = {
-            'name': 'test',
-            'databases': ['postgresql']
-        }
-        with self.tmp_app(meta) as app:
+    def test_update_databases(self):
+        with self.tmp_app({'databases': ['postgresql']}) as app:
             self.assertTrue(app.databases)
             self.assertEqual(list(app.databases)[0].engine, 'postgresql')
 
-    def test_setup_data_dirs(self):
+    def test_update_data_dirs(self):
         dirs = {'a': 33, 'b': 33}
         meta = {
             "data_dirs": ["a", "b"]
@@ -148,11 +162,13 @@ class AppTest(WamTestCase):
             self.assertEqual(os.stat(os.path.join(self.app.path, path)).st_uid,
                              uid)
 
-    @contextmanager
-    def tmp_app(self, meta):
-        with tmp_software(meta) as software_id:
-            app = self.manager.add(software_id, 'localhoax')
-            yield app
+    def test_backup(self):
+       with self.tmp_app({'databases': ['postgresql'], 'data_dirs': ['a', 'b']}) as app:
+           check_call(['sudo', '-u', app.job_user, 'cp', os.path.join(RES_PATH, 'test.json'),
+                       os.path.join(app.path, 'a/test.json')])
+           backup = app.backup()
+           self.assertTrue(os.path.isfile(os.path.join(backup, PostgreSQL.dump_name)))
+           self.assertTrue(os.path.isfile(os.path.join(backup, 'a/test.json')))
 
 @contextmanager
 def tmp_software(meta):
@@ -188,6 +204,13 @@ class AppDatabaseTest(WamTestCase):
     def test_delete_all_databases(self):
         self.app.delete_all_databases()
         self.assertFalse(self.app.databases)
+
+class NginxTest(WamTestCase):
+    def test_configure(self):
+        with self.tmp_app():
+            self.manager.nginx.configure()
+            self.assertFalse(call(['sudo', 'nginx', '-c', os.path.abspath('res/nginx.conf'),
+                                   '-t']))
 
 #class PackageEngineTestMixin:
 #    def test_install(self):
@@ -234,7 +257,7 @@ class DatabaseEngineTestMixin:
         try:
             database = self.engine.create('litterbox', 'cat', 'purr')
             self.engine.dump(database, d)
-            #self.assertTrue(os.path.isfile(os.path.join(d, 'postgresql.sql')))
+            self.assertTrue(os.path.isfile(os.path.join(d, self.engine.dump_name)))
         finally:
             self.engine.delete(
                 Database(self.engine.id, 'litterbox', 'cat', 'purr'))

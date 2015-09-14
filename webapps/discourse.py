@@ -38,12 +38,12 @@ def setup(app):
     call('BUNDLE_GEMFILE={} RAILS_ENV=production bundle exec rake -f {} db:migrate'.format(gemfile, rakefile))
     call('BUNDLE_GEMFILE={} RAILS_ENV=production bundle exec rake -f {} assets:precompile'.format(gemfile, rakefile))
 
-def start(app):
+#def start(app):
     # TODO: look in the discourse startup util scripts how to run it without cd
-    gemfile = os.path.join(app.path, 'Gemfile')
+    #gemfile = os.path.join(app.path, 'Gemfile')
     #env = {'BUNDLE_GEMFILE': gemfile, 'RAILS_ENV': 'production'}
-    app.start_job('bundle exec rails server -e production', cwd=app.path)
-    app.start_job('bundle exec sidekiq -e production', cwd=app.path)
+    #app.start_job('bundle exec rails server -e production', cwd=app.path)
+    #app.start_job('bundle exec sidekiq -e production', cwd=app.path)
 
 # ARCHIVE OR DELETE(ONLY IF ABOVE WORKS GOOD ENOUGH)
 # sudo apt-get install -t jessie-backports docker.io

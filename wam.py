@@ -9,8 +9,8 @@ import json
 import subprocess
 import logging
 import shlex
-from subprocess import Popen, CalledProcessError, check_call
-from shutil import make_archive
+from subprocess import Popen, CalledProcessError, check_call, check_output
+from shutil import copyfile, make_archive
 from random import choice
 from string import ascii_lowercase
 from urllib.parse import urldefrag
@@ -19,6 +19,21 @@ from os import path, mkdir
 from errno import ENOENT
 
 # TODO: Implement config parsing
+
+_NGINX_CONFIG_PATH = '/etc/nginx/conf.d/wam.conf'
+
+_NGINX_SERVER_TEMPLATE = """\
+server {{
+    listen {port};
+    server_name {host};
+    location / {{
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://localhost:{app_port};
+    }}
+}}
+"""
 
 class WebAppManager:
     """
@@ -31,23 +46,43 @@ class WebAppManager:
     * `data_path`
     * `store_path`
     * `ext_path`
+
+    .. attribute: port_range
+
+       See ``port_range`` configuration.
+
+    .. attribute: nginx
+
+       :obj:`Nginx` server.
     """
 
-    def __init__(self, config={}):
+    def __init__(self, config={}, **kwargs):
         self.config = {
             'data_path': 'data',
             # TODO: dont even start with hardcoding again. implement config
             # parsing
-            'email': 'sven.jms+app.wam@gmail.com' #None
+            'email': 'sven.jms+app.wam@gmail.com', #None
+            'port_range': '8000-8079'
         }
         self.config.update(config)
 
         self.data_path = self.config['data_path']
         self.store_path = os.path.join(self.data_path, 'wam.json')
+        self.backup_path = os.path.join(self.data_path, 'backups')
         self.ext_path = os.path.join(self.data_path, 'ext')
 
+        try:
+            self.port_range = tuple(int(p) for p in self.config['port_range'].split('-'))
+        except ValueError:
+            raise ValueError('port_range')
+        if not (len(self.port_range) == 2 and self.port_range[0] < self.port_range[1]):
+            raise ValueError('port_range')
+
         self.apps = {}
-        self.server = WebServer(self)
+        args = {}
+        if 'nginx_config_path' in kwargs:
+            args['config_path'] = kwargs['nginx_config_path']
+        self.nginx = Nginx(self, **args)
         self.cron = Cron(self)
         self.logger = logging.getLogger('wam')
         self._logger = self.logger
@@ -65,9 +100,9 @@ class WebAppManager:
         }
 
     def start(self):
-        if self.data_path == 'data':
+        for d in [self.data_path, self.backup_path, self.ext_path]:
             try:
-                os.mkdir(self.data_path)
+                os.mkdir(d)
             except FileExistsError:
                 pass
         self.apps = self.load()['apps']
@@ -119,16 +154,25 @@ class WebAppManager:
         an HTTP URL pointing to a webapp meta file
         """
 
+        if not os.path.isfile(software_id):
+            raise ValueError('software_id')
+
         self._logger.info('Adding %s', url)
+
+        used_ports = {a.port for a in self.apps.values()}
+        free_ports = set(range(self.port_range[0], self.port_range[1] + 1)) - used_ports
+        port = sorted(free_ports)[0]
+
         secret = randstr()
-        app = App(url, software_id, secret, {}, {}, set(), wam=self)
+        app = App(url, software_id, port, secret, {}, {}, set(), wam=self)
         self.apps[app.id] = app
         mkdir(app.path)
-        self.server.configure()
+        self.nginx.configure()
         self.store()
 
         try:
-            app.setup()
+            #app.setup()
+            app.update(fresh=True)
             return app
         except ScriptError:
             self.logger.error('app setup failed')
@@ -147,7 +191,7 @@ class WebAppManager:
             self.logger.error('app cleanup failed, continuing removal')
         os.rename(app.path, '/tmp/wam.backup.{}'.format(randstr()))
         del self.apps[app.id]
-        self.server.configure()
+        self.nginx.configure()
         self.store()
 
     def json(self):
@@ -176,12 +220,17 @@ class App:
     * `data_dirs`
     * `jobs`
     * `manager`
+
+    .. attribute:: port
+
+       Port the web server uses to communicate with the application server.
     """
 
-    def __init__(self, id, software_id, secret, jobs, installed_packages,
-                 databases, wam, data_dirs=set(), pids=set()):
+    def __init__(self, id, software_id, port, secret, jobs, installed_packages, databases, wam,
+                 data_dirs=set(), pids=set()):
         self.id = id
         self.software_id = software_id
+        self.port = port
         self.secret = secret
         self.installed_packages = installed_packages
         self.databases = databases
@@ -245,6 +294,7 @@ class App:
     @property
     def data(self):
         return {
+            'port': self.port,
             'path': self.path
         }
 
@@ -276,9 +326,10 @@ openssl x509 -in $DOMAIN.crt -text
             f.write(certificate)
         # TODO: validate certificate somehow
         call('openssl x509 -in {} -text'.format(self.certificate_path))
-        self.wam.server.configure()
+        self.manager.nginx.configure()
 
     def setup(self):
+        raise NotImplementedError()
         """
         should setup
          * config
@@ -294,22 +345,75 @@ openssl x509 -in $DOMAIN.crt -text
         # TODO: should we really rollback if start fails? maybe a warning is the better option (i.e. handle neat exception)
         self.start()
 
+    def update(self, fresh=False):
+        self._logger.info('Updating %s', self.id)
+
+        # TODO: fresh not via paramater, but as state/property
+        if not fresh:
+            running = self.is_running
+            if running:
+                self.stop()
+            self.backup()
+
+        self._update_code()
+        self._update_packages()
+        self._update_databases()
+        self._update_data_dirs()
+        self._call('update')
+
+        if fresh or running:
+            self.start()
+
     def _update_code(self):
+        self._logger.info('Updating code')
+
         try:
             url = self.meta['download']
         except KeyError:
             return
-        self.clone(url)
+
+        try:
+            git_root = (check_output(['git', '-C', self.path, 'rev-parse', '--show-toplevel'])
+                        .decode().strip())
+        except CalledProcessError:
+            git_root = None
+        repo_exists = (git_root == self.path)
+
+        if not repo_exists:
+            self._logger.info('Cloning from %s', url)
+            url, branch = urldefrag(url)
+            cmd = ['git', 'clone', '-q', '--single-branch', url, self.path]
+            if branch:
+                cmd[4:4] = ['-b', branch]
+            check_call(cmd)
+        else:
+            self._logger.info('Pulling from %s', url)
+            check_call(['git', '-C', self.path, 'fetch'])
+            check_call(['git', '-C', self.path, 'merge'])
 
     def _update_packages(self):
+        # TODO: Skip already installed packages
+        # TODO: Remove packages
         packages_meta = self.meta.get('packages', {})
         for engine, packages in packages_meta.items():
             self.install(engine, set(packages))
 
     def _update_databases(self):
-        databases = self.meta.get('databases', [])
-        for database in databases:
-            self.create_database(database)
+        target_databases = set(self.meta.get('databases', []))
+        current_databases = {d.engine for d in self.databases}
+        new = target_databases - current_databases
+        old = current_databases - target_databases
+        for engine in old:
+            # TODO: Delete databases
+            pass
+        for engine in new:
+            self.create_database(engine)
+
+    def _restore_databases(self, backup):
+        for database in self.databases:
+            self._logger.info('Restoring %s database', database.engine)
+            engine = self.manager._database_engines[database.engine]
+            engine.restore(os.path.join(backup, engine.dump_name))
 
     def _update_data_dirs(self):
         data_dirs = set(self.software_meta.get('data_dirs', []))
@@ -337,6 +441,14 @@ openssl x509 -in $DOMAIN.crt -text
         self.data_dirs = data_dirs
         self.manager.store()
 
+    def _backup_data_dirs(self, backup_path):
+        from shutil import copytree
+        for data_dir in self.data_dirs:
+            copytree(os.path.join(self.path, data_dir), os.path.join(backup_path, data_dir))
+
+    def _restore_data_dirs(self, backup):
+        pass
+
     def backup(self):
         # TODO: app settings should also be backed up, so a wam app can be
         # restored just by selecting a .tar.gz file
@@ -346,9 +458,10 @@ openssl x509 -in $DOMAIN.crt -text
             self.stop()
 
         from datetime import datetime
-        backup_path = os.path.join(
-            self.path, 'backup/backup-{}'.format(datetime.utcnow().isoformat()))
-        os.makedirs(backup_path)
+        backup_path = os.path.join(self.manager.backup_path,
+                                   'backup-{}-{}'.format(self.sid, datetime.utcnow().isoformat()))
+        #os.makedirs(backup_path)
+        os.mkdir(backup_path)
 
         try:
             self._call('backup')
@@ -357,24 +470,26 @@ openssl x509 -in $DOMAIN.crt -text
 
         # TODO: only backup datadirs and db
         self._backup_all_databases(backup_path)
+        self._backup_data_dirs(backup_path)
 
-        # TODO: replace id with timestamp
+
         # TODO: other directory (e.g. var/www/wam/backup)?
         #make_archive('/tmp/wam.backup.{}.{}'.format(self.sid, randstr()),
         #             'gztar', self.wam.config['data_path'], self.sid, verbose=2)
         if running:
             self.start()
 
-    def update(self):
-        self._logger.info('Updating %s', self.id)
+        return backup_path
 
+    def restore(self, backup):
+        self._logger.info('Restoring %s', self.id)
         running = self.is_running
         if running:
             self.stop()
         self.backup()
 
-        self._call('update')
-        self._update_data_dirs()
+        self._restore_databases(backup)
+        self._restore_data_dirs(backup)
 
         if running:
             self.start()
@@ -590,16 +705,6 @@ openssl x509 -in $DOMAIN.crt -text
             raise ValueError('engine_unknown')
         return db"""
 
-    def clone(self, url):
-        """Clone a (git) repository into app path."""
-        self._logger.info('Cloning %s', url)
-        url, branch = urldefrag(url)
-        cmd = ['git', 'clone', '-q', '--single-branch']
-        if branch:
-            cmd += ['-b', branch]
-        cmd += [url, self.path]
-        check_call(cmd)
-
     def pull(self):
         call('GIT_DIR={} GIT_WORK_TREE={} git pull'.format(
             os.path.join(self.path, '.git'), self.path))
@@ -625,8 +730,8 @@ openssl x509 -in $DOMAIN.crt -text
         return None
 
     def json(self):
-        attrs = ['id', 'software_id', 'secret', 'jobs', 'databases',
-                 'installed_packages', 'pids']
+        attrs = ['id', 'software_id', 'port', 'secret', 'jobs', 'databases', 'installed_packages',
+                 'pids']
         json = {a: getattr(self, a) for a in attrs}
         #json['jobs'] = [j.json() for j in self.jobs.values()]
         #json['installed_packages'] = {e: list(p) for e, p
@@ -643,65 +748,25 @@ from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, build_opener, urlopen
 SERVER_CONFIG_PATH = '/etc/apache2/sites-available/wam.conf'
 
-class WebServer:
-    def __init__(self, wam):
-        self.wam = wam
+class Nginx:
+    """Nginx server.
+
+    .. attribute:: manager
+
+       Context :obj:`WebAppManager`.
+    """
+
+    def __init__(self, manager, config_path='/etc/nginx/conf.d/wam.conf'):
+        self.manager = manager
+        self.config_path = config_path
 
     def configure(self):
-        # TODO: implement nginx
-        return
-
-        self._logger.info('configuring Apache httpd...')
-        hosts = []
-        for app in self.wam.apps.values():
-            port = 80
-            ssl = ''
-            if app.encrypted:
-                ssl = SERVER_SSL_TEMPLATE.format(
-                    certificate_path=app.certificate_path,
-                    certificate_key_path=app.certificate_key_path)
-                port = 443
-
-            # extensions
-            more = ''
-            x = ProtectApp(app)
-            if x.protected:
-                more = SERVER_PW_TEMPLATE.format(path=app.path, id=app.id,
-                                                 htpasswd_path=x.htpasswd_path)
-
-            hosts.append(SERVER_HOST_TEMPLATE.format(
-                port=port, host=app.id, path=app.path, ssl=ssl, more=more))
-        with open(SERVER_CONFIG_PATH, 'w') as f:
-            f.write('\n'.join(hosts))
-        call('sudo /usr/sbin/service apache2 reload')
-
-# TODO: wam logfile
-SERVER_HOST_TEMPLATE = """\
-<VirtualHost *:{port}>
-    ServerName {host}
-    ServerAlias www.{host}
-    DocumentRoot {path}
-
-    {ssl}
-
-    {more}
-</VirtualHost>
-"""
-
-SERVER_SSL_TEMPLATE = """\
-    SSLEngine on
-    SSLCertificateFile {certificate_path}
-    SSLCertificateKeyFile {certificate_key_path}
-"""
-
-SERVER_PW_TEMPLATE = """\
-    <Directory {path}>
-        AuthType Basic
-        AuthName {id}
-        AuthUserFile {htpasswd_path}
-        Require valid-user
-    </Directory>
-"""
+        servers = []
+        for app in self.manager.apps.values():
+            servers.append(_NGINX_SERVER_TEMPLATE.format(port=80, host=app.id, app_port=app.port))
+        with open(self.config_path, 'w') as f:
+            f.write('\n'.join(servers))
+        check_call(['sudo', 'systemctl', 'reload', 'nginx'])
 
 class PackageEngine:
     def install(self, packages, app_path):
@@ -775,8 +840,12 @@ class DatabaseEngine:
     def dump(self, database, path):
         raise NotImplementedError()
 
+    def restore(self, database, dump_path):
+        raise NotImplementedError()
+
 class PostgreSQL(DatabaseEngine):
     id = 'postgresql'
+    dump_name = 'postgresql.sql'
 
     def connect(self):
         import psycopg2
@@ -784,8 +853,12 @@ class PostgreSQL(DatabaseEngine):
         return db
 
     def dump(self, database, path):
-        with open(os.path.join(path, 'postgresql.sql'), 'w') as f:
+        with open(os.path.join(path, self.dump_name), 'w') as f:
             check_call(['pg_dump', database.name], stdout=f)
+
+    def restore(self, database, dump_path):
+        with open(dump_path) as f:
+            check_call(['psql', '-1', database.name], stdin=f)
 
 class MySQL(DatabaseEngine):
     # TODO
@@ -806,6 +879,7 @@ class MySQL(DatabaseEngine):
 
 class Redis(DatabaseEngine):
     id = 'redis'
+    dump_name = 'redis.rdb'
 
     def __init__(self, get_redis_databases):
         super().__init__()
@@ -825,10 +899,18 @@ class Redis(DatabaseEngine):
         pass
 
     def dump(self, database, path):
-        return
-        # TODO: just dummy hack, implement
-        with open(os.path.join(path, 'postgresql.sql'), 'w') as f:
-            f.write('foo\n')
+        from redis import StrictRedis
+        r = StrictRedis()
+        r.save()
+        copyfile('/var/lib/redis/dump.rdb', os.path.join(path, self.dump_name))
+
+    def restore(self, database, dump_path):
+        # TODO: problem is that only the whole instance can be dumped and restored easily, not indiviudal
+        # databases. Thus restoring an older backup of database A might override stuff from database
+        # B. A solution would be to run multiple redis instances (instead of one instance with
+        # multiple databases) (advantage would also be access control, ...), but this is not
+        # implemented in Debian init yet.
+        pass
 
 class Database:
     def __init__(self, engine, name, user, secret, wam=None):
@@ -901,8 +983,9 @@ class ProtectApp:
     def protect(self, pw):
         # FIXME: python way? no pw over commandline!!!!
         # FIXME: chmod!!!
-        call('htpasswd -bc {} "" {}'.format(self.htpasswd_path, pw))
-        self.manager.server.configure()
+        # TODO: reenable
+        #check_call('htpasswd -bc {} "" {}'.format(self.htpasswd_path, pw))
+        self.manager.nginx.configure()
 
 # utilities
 
@@ -968,6 +1051,16 @@ if __name__ == '__main__':
     app_update_cmd.add_argument('app_id')
     app_backup_cmd = subparsers.add_parser('app-backup')
     app_backup_cmd.add_argument('app_id')
+
+    # extensions
+    def protect_app(manager, args):
+        app = manager.apps[args.app_id]
+        ProtectApp(app).protect(args.password)
+    protect_app_cmd = subparsers.add_parser('protect-app')
+    protect_app_cmd.set_defaults(run=protect_app)
+    protect_app_cmd.add_argument('app_id')
+    protect_app_cmd.add_argument('password')
+
     args = parser.parse_args()
     #print(args)
 
@@ -994,6 +1087,9 @@ if __name__ == '__main__':
     elif args.cmd == 'app-update':
         app = manager.apps[args.app_id]
         app.update()
+    else:
+        print(args)
+        args.run(manager, args)
 
     # TODO exec command
 

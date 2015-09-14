@@ -1,4 +1,8 @@
 {
-    "data_dirs": ["log", "public/uploads", "tmp"],
+    "data_dirs": ["log", "public/uploads", "public/backups", "tmp"],
+    "jobs": [
+        {"cmd": "bundle exec rails server -e production -b localhost -p {port}", "cwd": "{path}"},
+        {"cmd": "bundle exec sidekiq -e production", "cwd": "{path}"}
+    ],
     "hooks": "discourse.py"
 }
