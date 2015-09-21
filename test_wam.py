@@ -13,6 +13,10 @@ from wam import WebAppManager, Apt, Bundler, Bower, PostgreSQL, Database, Script
 
 RES_PATH = os.path.join(os.path.dirname(__file__), 'res')
 
+# XXX
+#import logging
+#logging.basicConfig(level=logging.INFO)
+
 class WamTestCase(TestCase):
     def setUp(self, **args):
         d = mktemp()
@@ -21,6 +25,7 @@ class WamTestCase(TestCase):
         #d = mkdtemp()
         config = {'data_path': d}
         args.setdefault('nginx_config_path', '/tmp/wam.conf')
+        args.setdefault('auto_backup', False)
 
         self.manager = WebAppManager(config=config, **args)
         self.manager.start()
@@ -141,34 +146,45 @@ class AppTest(WamTestCase):
             self.assertEqual(list(app.databases)[0].engine, 'postgresql')
 
     def test_update_data_dirs(self):
-        dirs = {'a': 33, 'b': 33}
         meta = {
-            "data_dirs": ["a", "b"]
+            'data_dirs': ['a', 'b']
         }
+        data_dirs = {'a', 'b'}
         with self.tmp_app(meta) as app:
-            self.assertEqual(app.data_dirs, {'a', 'b'})
-            for path, uid in dirs.items():
-                self.assertEqual(os.stat(os.path.join(app.path, path)).st_uid, uid)
+            self.assertEqual(app.data_dirs, data_dirs)
+            for data_dir in data_dirs:
+                self.assertEqual(os.stat(os.path.join(app.path, data_dir)).st_uid, 33)
 
     def test_update_data_dirs_changed(self):
-        # XXX what an ugly hack... please add a cool way to update software meta
-        # file
-        self.app._software_meta = json.loads('{"data_dirs": ["b", "c"]}')
-        dirs = {'a': os.geteuid(), 'b': 33, 'c': 33}
-
-        self.app.update()
-        self.assertEqual(self.app.data_dirs, {'b', 'c'})
-        for path, uid in dirs.items():
-            self.assertEqual(os.stat(os.path.join(self.app.path, path)).st_uid,
-                             uid)
+        with self.tmp_app({'data_dirs': ['a', 'b']}) as app:
+            # XXX what an ugly hack... please add a cool way to update software meta file
+            self.app._software_meta = json.loads('{"data_dirs": ["b", "c"]}')
+            data_dirs = {'b', 'c'}
+            self.app.update()
+            self.assertEqual(self.app.data_dirs, data_dirs)
+            self.assertFalse(os.path.exists(os.path.join(self.app.path, 'a')))
+            for data_dir in data_dirs:
+                self.assertEqual(os.stat(os.path.join(self.app.path, data_dir)).st_uid, 33)
 
     def test_backup(self):
-       with self.tmp_app({'databases': ['postgresql'], 'data_dirs': ['a', 'b']}) as app:
-           check_call(['sudo', '-u', app.job_user, 'cp', os.path.join(RES_PATH, 'test.json'),
-                       os.path.join(app.path, 'a/test.json')])
-           backup = app.backup()
-           self.assertTrue(os.path.isfile(os.path.join(backup, PostgreSQL.dump_name)))
-           self.assertTrue(os.path.isfile(os.path.join(backup, 'a/test.json')))
+        with self.tmp_app({'databases': ['postgresql'], 'data_dirs': ['a', 'b']}) as app:
+            self._copy_to_data_dir(app, 'test.json', 'a')
+            backup = app.backup()
+            self.assertTrue(os.path.isfile(os.path.join(backup, PostgreSQL.dump_name)))
+            self.assertTrue(os.path.isfile(os.path.join(backup, 'a/test.json')))
+
+    def test_restore(self):
+        with self.tmp_app({'databases': ['postgresql'], 'data_dirs': ['a', 'b']}) as app:
+            self._copy_to_data_dir(app, 'test.json', 'a')
+            backup = app.backup()
+            self._copy_to_data_dir(app, 'Gemfile', 'a')
+            app.restore(backup)
+            self.assertTrue(os.path.isfile(os.path.join(app.path, 'a/test.json')))
+            self.assertFalse(os.path.exists(os.path.join(app.path, 'a/Gemfile')))
+
+    def _copy_to_data_dir(self, app, file, data_dir):
+        check_call(['sudo', '-u', app.job_user, 'cp', os.path.join(RES_PATH, file),
+                    os.path.join(app.path, data_dir, file)])
 
 @contextmanager
 def tmp_software(meta):
@@ -177,7 +193,7 @@ def tmp_software(meta):
         f.flush()
         yield f.name
 
-class AppDatabaseTest(WamTestCase):
+"""class AppDatabaseTest(WamTestCase):
     def setUp(self):
         super().setUp()
         self.app = self.manager.add('res/test.json', 'localhost')
@@ -203,7 +219,7 @@ class AppDatabaseTest(WamTestCase):
 
     def test_delete_all_databases(self):
         self.app.delete_all_databases()
-        self.assertFalse(self.app.databases)
+        self.assertFalse(self.app.databases)"""
 
 class NginxTest(WamTestCase):
     def test_configure(self):
@@ -242,32 +258,49 @@ class BowerTest(TestCase):
 class DatabaseEngineTestMixin:
     def setUp(self, engine):
         self.engine = engine
+        try:
+            self.database = self.engine.create('litterbox', 'cat', 'secr3t')
+        except:
+            # If create() fails half way through, clean up
+            self.engine.delete(Database(self.engine.id, 'litterbox', 'cat', 'secr3t'))
+            raise
+
+    def tearDown(self):
+        self.engine.delete(self.database)
 
     def test_create(self):
-        # Implicitly tests connect() and delete()
+        # Implicitly tests connect()
         try:
-            database = self.engine.create('litterbox', 'cat', 'purr')
+            database = self.engine.create('litterbox2', 'cat2', 'secr3t')
         finally:
-            self.engine.delete(
-                Database('postgresql', 'litterbox', 'cat', 'purr'))
+            self.engine.delete(Database(self.engine.id, 'litterbox2', 'cat2', 'secr3t'))
+
+    def test_delete(self):
+        self.engine.delete(self.database)
 
     def test_dump(self):
         d = mkdtemp()
-        #print(d)
-        try:
-            database = self.engine.create('litterbox', 'cat', 'purr')
-            self.engine.dump(database, d)
-            self.assertTrue(os.path.isfile(os.path.join(d, self.engine.dump_name)))
-        finally:
-            self.engine.delete(
-                Database(self.engine.id, 'litterbox', 'cat', 'purr'))
+        print(d)
+        self.engine.dump(self.database, d)
+        self.assertTrue(os.path.isfile(os.path.join(d, self.engine.dump_name)))
+
+    def test_restore(self):
+        d = mkdtemp()
+        self.engine.dump(self.database, d)
+        self.engine.restore(self.database, os.path.join(d, self.engine.dump_name))
 
 class PostgreSQLTest(TestCase, DatabaseEngineTestMixin):
     def setUp(self):
         DatabaseEngineTestMixin.setUp(self, PostgreSQL())
 
+    def tearDown(self):
+        DatabaseEngineTestMixin.tearDown(self)
+
 class RedisTest(WamTestCase, DatabaseEngineTestMixin):
     def setUp(self):
         super().setUp()
-        DatabaseEngineTestMixin.setUp(self,
-                                      self.manager._database_engines['redis'])
+        DatabaseEngineTestMixin.setUp(self, self.manager._database_engines['redis'])
+
+    def tearDown(self):
+        DatabaseEngineTestMixin.tearDown(self)
+        super().tearDown()

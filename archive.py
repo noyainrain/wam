@@ -1,3 +1,20 @@
+def setup(self):
+    raise NotImplementedError()
+    """
+    should setup
+     * config
+     * datastores (db, directories)
+    """
+    self._call('setup')
+
+    self._update_code()
+    self._update_packages()
+    self._update_databases()
+    self._update_data_dirs()
+
+    # TODO: should we really rollback if start fails? maybe a warning is the better option (i.e. handle neat exception)
+    self.start()
+
 class WebServer:
     def __init__(self, wam):
         self.wam = wam

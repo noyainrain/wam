@@ -18,14 +18,20 @@ serve_static_files = true
 developer_emails = {developer_emails}
 """
 
-def setup(app):
-    app.clone('https://github.com/discourse/discourse.git#stable')
-    app.install('apt', {'postgresql-contrib', 'libpq-dev', 'libxml2', 'imagemagick'})
-    app.install('bundler')
-    psql_db = app.create_database('postgresql')
-    call('psql -d {} -c "CREATE EXTENSION pg_trgm;"'.format(psql_db.name))
-    call('psql -d {} -c "CREATE EXTENSION hstore;"'.format(psql_db.name))
-    redis_db = app.create_database('redis')
+# TODO: because it is so short now, convert it to a POSIX shell script
+
+#def setup(app):
+def update(app):
+    #app.clone('https://github.com/discourse/discourse.git#stable')
+    #app.install('apt', {'postgresql-contrib', 'libpq-dev', 'libxml2', 'imagemagick'})
+    #app.install('bundler')
+    #psql_db = app.create_database('postgresql')
+    #redis_db = app.create_database('redis')
+    # TODO: make databases accessible by engine
+    psql_db = next(d for d in app.databases if d.engine == 'postgresql')
+    redis_db = next(d for d in app.databases if d.engine == 'redis')
+    call('psql -d {} -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"'.format(psql_db.name))
+    call('psql -d {} -c "CREATE EXTENSION IF NOT EXISTS hstore;"'.format(psql_db.name))
     config = CONFIG_TEMPLATE.format(
         db_name=psql_db.name, db_username=psql_db.user,
         db_password=psql_db.secret, hostname=app.id, redis_db=redis_db.name,
@@ -35,8 +41,8 @@ def setup(app):
     gemfile = os.path.join(app.path, 'Gemfile')
     rakefile = os.path.join(app.path, 'Rakefile')
     # TODO: just use check_call here
-    call('BUNDLE_GEMFILE={} RAILS_ENV=production bundle exec rake -f {} db:migrate'.format(gemfile, rakefile))
-    call('BUNDLE_GEMFILE={} RAILS_ENV=production bundle exec rake -f {} assets:precompile'.format(gemfile, rakefile))
+    call('sudo -u {} BUNDLE_GEMFILE={} RAILS_ENV=production bundle exec rake -f {} db:migrate'.format(app.job_user, gemfile, rakefile))
+    call('sudo -u {} BUNDLE_GEMFILE={} RAILS_ENV=production bundle exec rake -f {} assets:precompile'.format(app.job_user, gemfile, rakefile))
 
 #def start(app):
     # TODO: look in the discourse startup util scripts how to run it without cd

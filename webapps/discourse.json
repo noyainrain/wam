@@ -1,5 +1,11 @@
 {
-    "data_dirs": ["log", "public/uploads", "public/backups", "tmp"],
+    "download": "https://github.com/discourse/discourse.git#stable",
+    "packages": {
+        "apt": ["postgresql-contrib", "libpq-dev", "libxml2", "imagemagick"],
+        "bundler": []
+    },
+    "databases": ["postgresql", "redis"],
+    "data_dirs": ["log", "public/uploads", "public/assets", "public/backups", "tmp"],
     "jobs": [
         {"cmd": "bundle exec rails server -e production -b localhost -p {port}", "cwd": "{path}"},
         {"cmd": "bundle exec sidekiq -e production", "cwd": "{path}"}

@@ -9,14 +9,16 @@ import json
 import subprocess
 import logging
 import shlex
+from time import sleep
 from subprocess import Popen, CalledProcessError, check_call, check_output
-from shutil import copyfile, make_archive
+from shutil import copyfile, copytree, make_archive
 from random import choice
 from string import ascii_lowercase
 from urllib.parse import urldefrag
 from re import sub
 from os import path, mkdir
 from errno import ENOENT
+from datetime import datetime
 
 # TODO: Implement config parsing
 
@@ -56,7 +58,7 @@ class WebAppManager:
        :obj:`Nginx` server.
     """
 
-    def __init__(self, config={}, **kwargs):
+    def __init__(self, config={}, auto_backup=True, **kwargs):
         self.config = {
             'data_path': 'data',
             # TODO: dont even start with hardcoding again. implement config
@@ -70,6 +72,7 @@ class WebAppManager:
         self.store_path = os.path.join(self.data_path, 'wam.json')
         self.backup_path = os.path.join(self.data_path, 'backups')
         self.ext_path = os.path.join(self.data_path, 'ext')
+        self.auto_backup = auto_backup
 
         try:
             self.port_range = tuple(int(p) for p in self.config['port_range'].split('-'))
@@ -298,53 +301,6 @@ class App:
             'path': self.path
         }
 
-    def encrypt(self):
-        """
-export DOMAIN=foo.inrain.org
-# generate private key
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out $DOMAIN.key
-# Generate certificate signing request. Details are ignored by StartSSL, so set
-# an empty subject string.
-openssl req -new -key $DOMAIN.key -subj / -out $DOMAIN.csr
-# do: upload csr to and download crt from StartSSL
-# show certificate details
-openssl x509 -in $DOMAIN.crt -text
-        """
-        if self.encrypted:
-            raise ValueError('app_already_encrypted')
-        # TODO is thre a python way to do this?
-        call('openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out {}'.format(
-            self.certificate_key_path))
-        csr_path = os.path.join(self.wam.config['data_path'], 'ssl', self.id + '.csr')
-        call('openssl req -new -key {} -subj / -out {}'.format(
-            self.certificate_key_path, csr_path))
-        # TODO: return what? better csr blob?
-        return csr_path
-
-    def encrypt2(self, certificate):
-        with open(self.certificate_path, 'w') as f:
-            f.write(certificate)
-        # TODO: validate certificate somehow
-        call('openssl x509 -in {} -text'.format(self.certificate_path))
-        self.manager.nginx.configure()
-
-    def setup(self):
-        raise NotImplementedError()
-        """
-        should setup
-         * config
-         * datastores (db, directories)
-        """
-        self._call('setup')
-
-        self._update_code()
-        self._update_packages()
-        self._update_databases()
-        self._update_data_dirs()
-
-        # TODO: should we really rollback if start fails? maybe a warning is the better option (i.e. handle neat exception)
-        self.start()
-
     def update(self, fresh=False):
         self._logger.info('Updating %s', self.id)
 
@@ -353,7 +309,8 @@ openssl x509 -in $DOMAIN.crt -text
             running = self.is_running
             if running:
                 self.stop()
-            self.backup()
+            if self.manager.auto_backup:
+                self.backup()
 
         self._update_code()
         self._update_packages()
@@ -361,6 +318,7 @@ openssl x509 -in $DOMAIN.crt -text
         self._update_data_dirs()
         self._call('update')
 
+        self.manager.store()
         if fresh or running:
             self.start()
 
@@ -410,25 +368,21 @@ openssl x509 -in $DOMAIN.crt -text
         for engine in new:
             self.create_database(engine)
 
-    def _restore_databases(self, backup):
-        for database in self.databases:
-            self._logger.info('Restoring %s database', database.engine)
-            engine = self.manager._database_engines[database.engine]
-            engine.restore(os.path.join(backup, engine.dump_name))
-
-    def _update_data_dirs(self):
-        data_dirs = set(self.software_meta.get('data_dirs', []))
+    def _update_data_dirs(self, cleanup=False):
+        data_dirs = set(self.software_meta.get('data_dirs', []) if not cleanup else [])
         new = data_dirs - self.data_dirs
         old = self.data_dirs - data_dirs
-        for path in old:
-            self._logger.debug('Resetting data directory %s', path)
-            check_call([
-                'sudo', 'chown', '-R',
-                '{}:{}'.format(os.geteuid(), os.getegid()),
-                os.path.join(self.path, path)])
+        for data_dir in old:
+            self._logger.info('Deleting data directory %s', data_dir)
             #chown(os.path.join(self.path, path), os.geteuid(), os.getegid())
+            # It is safer to remove the tree directly as the job user, which is less privileged
+            #check_call(['sudo', '-u', self.job_user, 'rm', '-r', os.path.join(self.path, path)])
+
+            path = os.path.join(self.path, data_dir)
+            check_call(['sudo', 'chown', '-R', '{}:{}'.format(os.geteuid(), os.getegid()), path])
+            os.rename(path, '/tmp/wam-{}'.format(randstr()))
         for path in new:
-            self._logger.debug('Setting data directory %s', path)
+            self._logger.info('Creating data directory %s', path)
             path = os.path.join(self.path, path)
             try:
                 mkdir(path)
@@ -440,80 +394,110 @@ openssl x509 -in $DOMAIN.crt -text
             #from shutil import chown
             #chown(path, self.job_user, self.job_user)
         self.data_dirs = data_dirs
-        self.manager.store()
-
-    def _backup_data_dirs(self, backup_path):
-        from shutil import copytree
-        for data_dir in self.data_dirs:
-            copytree(os.path.join(self.path, data_dir), os.path.join(backup_path, data_dir))
-
-    def _restore_data_dirs(self, backup):
-        pass
-
-    def backup(self):
-        # TODO: app settings should also be backed up, so a wam app can be
-        # restored just by selecting a .tar.gz file
-        self._logger.info('Backing up %s', self.id)
-        running = self.is_running
-        if running:
-            self.stop()
-
-        from datetime import datetime
-        backup_path = os.path.join(self.manager.backup_path,
-                                   'backup-{}-{}'.format(self.sid, datetime.utcnow().isoformat()))
-        #os.makedirs(backup_path)
-        os.mkdir(backup_path)
-
-        try:
-            self._call('backup')
-        except CalledProcessError as e:
-            raise ValueError('user_script') # TODO: own error
-
-        # TODO: only backup datadirs and db
-        self._backup_all_databases(backup_path)
-        self._backup_data_dirs(backup_path)
-
-
-        # TODO: other directory (e.g. var/www/wam/backup)?
-        #make_archive('/tmp/wam.backup.{}.{}'.format(self.sid, randstr()),
-        #             'gztar', self.wam.config['data_path'], self.sid, verbose=2)
-        if running:
-            self.start()
-
-        return backup_path
-
-    def restore(self, backup):
-        self._logger.info('Restoring %s', self.id)
-        running = self.is_running
-        if running:
-            self.stop()
-        self.backup()
-
-        self._restore_databases(backup)
-        self._restore_data_dirs(backup)
-
-        if running:
-            self.start()
 
     def cleanup(self):
-        self._logger.info('Cleaning up %s', self.id)
         self.stop()
-        self.backup()
+        if self.manager.auto_backup:
+            self.backup()
 
+        self._logger.info('Cleaning up %s', self.id)
         try:
             self._call('cleanup')
         finally:
             self.delete_all_databases()
             self.uninstall_all()
 
+    def backup(self):
+        """See :ref:`wam app-backup`."""
+        running = self.is_running
+        if running:
+            self.stop()
+
+        self._logger.info('Backing up %s', self.id)
+        backup = os.path.join(self.manager.backup_path,
+                              'backup-{}-{}'.format(self.sid, datetime.utcnow().isoformat()))
+        os.mkdir(backup)
+        self._backup_databases(backup)
+        self._backup_data_dirs(backup)
+        self._call('backup')
+
+        if running:
+            self.start()
+        return backup
+
+    def _backup_databases(self, backup):
+        for database in self.databases:
+            self._logger.info('Backing up %s database', database.engine)
+            self.manager._database_engines[database.engine].dump(database, backup)
+
+    def _backup_data_dirs(self, backup):
+        for data_dir in self.data_dirs:
+            self._logger.info('Backing up data directory %s', data_dir)
+            copytree(os.path.join(self.path, data_dir), os.path.join(backup, data_dir))
+
+    def restore(self, backup):
+        """See :ref:`wam app-restore`.
+
+        If the backup is not a backup of (the current version) of the app, a :exc:`ValueError`
+        (``backup_invalid``) is raised.
+        """
+        # Validate backup
+        for database in self.databases:
+            engine = self.manager._database_engines[database.engine]
+            if not os.path.isfile(os.path.join(backup, engine.dump_name)):
+                raise ValueError('backup_invalid')
+        for data_dir in self.data_dirs:
+            if not os.path.isdir(os.path.join(backup, data_dir)):
+                raise ValueError('backup_invalid')
+
+        running = self.is_running
+        if running:
+            self.stop()
+        if self.manager.auto_backup:
+            self.backup()
+
+        self._logger.info('Restoring %s', self.id)
+        self._restore_databases(backup)
+        self._restore_data_dirs(backup)
+
+        if running:
+            self.start()
+
+    def _restore_databases(self, backup):
+        for database in self.databases:
+            self._logger.info('Restoring %s database', database.engine)
+            engine = self.manager._database_engines[database.engine]
+            engine.restore(database, os.path.join(backup, engine.dump_name))
+
+    def _restore_data_dirs(self, backup):
+        self._update_data_dirs(cleanup=True)
+        for data_dir in self.meta.get('data_dirs', []):
+            self._logger.info('Restoring data directory %s', data_dir)
+            copytree(os.path.join(backup, data_dir), os.path.join(self.path, data_dir))
+        self._update_data_dirs()
+#        for data_dir in self.data_dirs:
+#            root = os.path.join(backup, data_dir)
+#            for path, dirs, files in os.walk(root):
+#                path = relpath(root, path)
+#                for dir in dirs:
+#                    try:
+#                        os.mkdir(os.path.join(backup, path, dir))
+#                    except FileExistsError:
+#                        # That's okay
+#                        pass
+#                for file in files:
+#                    copy2(os.path.join(self.path, path, file), os.path.join(backup, path, file))
+
     def start(self):
-        self._logger.info('Starting %s', self.id)
+        if not self.meta['jobs']:
+            return
+
         if self.pids:
             # this is a restart, good idea here?
             self.stop()
 
-        jobs = self.meta['jobs']
-        for job in jobs:
+        self._logger.info('Starting %s', self.id)
+        for job in self.meta['jobs']:
             cmd = job['cmd'].format(**self.data)
             cwd = job.get('cwd')
             if cwd:
@@ -521,13 +505,18 @@ openssl x509 -in $DOMAIN.crt -text
             self.start_job(cmd, cwd=cwd)
 
         self._call('start')
+        sleep(2)
 
     def stop(self):
+        if not self.pids:
+            return
+
         self._logger.info('Stopping %s', self.id)
         try:
             self._call('stop')
         finally:
             self.stop_all_jobs()
+        sleep(2)
 
     def start_job(self, cmd, env={}, cwd=None):
         args = shlex.split(cmd)
@@ -569,6 +558,36 @@ openssl x509 -in $DOMAIN.crt -text
         del self.jobs[job.id]
         self.wam.cron.configure()
         self.manager.store()
+
+    def encrypt(self):
+        """
+export DOMAIN=foo.inrain.org
+# generate private key
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out $DOMAIN.key
+# Generate certificate signing request. Details are ignored by StartSSL, so set
+# an empty subject string.
+openssl req -new -key $DOMAIN.key -subj / -out $DOMAIN.csr
+# do: upload csr to and download crt from StartSSL
+# show certificate details
+openssl x509 -in $DOMAIN.crt -text
+        """
+        if self.encrypted:
+            raise ValueError('app_already_encrypted')
+        # TODO is thre a python way to do this?
+        call('openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out {}'.format(
+            self.certificate_key_path))
+        csr_path = os.path.join(self.wam.config['data_path'], 'ssl', self.id + '.csr')
+        call('openssl req -new -key {} -subj / -out {}'.format(
+            self.certificate_key_path, csr_path))
+        # TODO: return what? better csr blob?
+        return csr_path
+
+    def encrypt2(self, certificate):
+        with open(self.certificate_path, 'w') as f:
+            f.write(certificate)
+        # TODO: validate certificate somehow
+        call('openssl x509 -in {} -text'.format(self.certificate_path))
+        self.manager.nginx.configure()
 
     def _call(self, op):
         try:
@@ -659,7 +678,7 @@ openssl x509 -in $DOMAIN.crt -text
     def create_database(self, engine):
         if engine not in self.manager._database_engines:
             raise ValueError('engine_unknown')
-        self._logger.info('Creating database')
+        self._logger.info('Creating %s database', engine)
         database = self.manager._database_engines[engine].create(
             self.sid, self.dbuser, self.secret)
         self.databases.add(database)
@@ -675,7 +694,7 @@ openssl x509 -in $DOMAIN.crt -text
         db.close()"""
 
     def delete_database(self, database):
-        self._logger.info('Deleting database')
+        self._logger.info('Deleting %s database', database.engine)
         # we only do complete app backups
         #self.backup_database(database)
         self.manager._database_engines[database.engine].delete(database)
@@ -685,14 +704,6 @@ openssl x509 -in $DOMAIN.crt -text
     def delete_all_databases(self):
         for database in set(self.databases):
             self.delete_database(database)
-
-    def backup_database(self, database, path):
-        self._logger.info('Backing up database %s', database.engine)
-        self.manager._database_engines[database.engine].dump(database, path)
-
-    def _backup_all_databases(self, path):
-        for db in self.databases:
-            self.backup_database(db, path)
 
     """def _connect_db(self, engine):
         if engine == 'mysql':
@@ -731,8 +742,8 @@ openssl x509 -in $DOMAIN.crt -text
         return None
 
     def json(self):
-        attrs = ['id', 'software_id', 'port', 'secret', 'jobs', 'databases', 'installed_packages',
-                 'pids']
+        attrs = ['id', 'software_id', 'port', 'secret', 'jobs', 'data_dirs', 'databases',
+                 'installed_packages', 'pids']
         json = {a: getattr(self, a) for a in attrs}
         #json['jobs'] = [j.json() for j in self.jobs.values()]
         #json['installed_packages'] = {e: list(p) for e, p
@@ -811,15 +822,28 @@ class DatabaseEngine:
         raise NotImplementedError()
 
     def create(self, name, user, secret):
+        raise NotImplementedError()
+
+    def delete(self, database):
+        raise NotImplementedError()
+
+    def dump(self, database, path):
+        raise NotImplementedError()
+
+    def restore(self, database, dump_path):
+        raise NotImplementedError()
+
+class SQLDatabaseEngine(DatabaseEngine):
+    def create(self, name, user, secret):
         db = self.connect()
         # Some databases (e.g. PostgreSQL) don't like CREATE statements in
         # transactions
         db.autocommit = True
         c = db.cursor()
-        c.execute('CREATE DATABASE {}'.format(name))
         c.execute("CREATE USER {} PASSWORD '{}'".format(user, secret))
         # TODO: mysql ON {}.* ??
         # TODO: mysql IDENTIFIED BY '{}' ??
+        c.execute('CREATE DATABASE {}'.format(name))
         c.execute('GRANT ALL ON DATABASE {} TO {}'.format(name, user))
         db.close()
         return Database(self.id, name, user, secret)
@@ -838,13 +862,20 @@ class DatabaseEngine:
             pass
         db.close()
 
-    def dump(self, database, path):
-        raise NotImplementedError()
-
     def restore(self, database, dump_path):
+        db = self.connect()
+        db.autocommit = True
+        c = db.cursor()
+        c.execute('DROP DATABASE {}'.format(database.name))
+        c.execute('CREATE DATABASE {}'.format(database.name))
+        c.execute('GRANT ALL ON DATABASE {} TO {}'.format(database.name, database.user))
+        db.close()
+        self.do_restore(database, dump_path)
+
+    def do_restore(self, database, dump_path):
         raise NotImplementedError()
 
-class PostgreSQL(DatabaseEngine):
+class PostgreSQL(SQLDatabaseEngine):
     id = 'postgresql'
     dump_name = 'postgresql.sql'
 
@@ -854,14 +885,17 @@ class PostgreSQL(DatabaseEngine):
         return db
 
     def dump(self, database, path):
-        with open(os.path.join(path, self.dump_name), 'w') as f:
-            check_call(['pg_dump', database.name], stdout=f)
+        check_call(['pg_dump', '-O', '-f', os.path.join(path, self.dump_name), database.name])
 
-    def restore(self, database, dump_path):
-        with open(dump_path) as f:
-            check_call(['psql', '-1', database.name], stdin=f)
+    def do_restore(self, database, dump_path):
+        # NOTE: I cannot use -1, because there are errors about plpgsql
 
-class MySQL(DatabaseEngine):
+        env = dict(os.environ)
+        env['PGPASSWORD'] = database.secret
+        check_call(['psql', '-h', 'localhost', '-f', dump_path, database.name, database.user],
+                   env=env)
+
+class MySQL(SQLDatabaseEngine):
     # TODO
     def connect(self):
         # TODO: test
@@ -1050,13 +1084,38 @@ if __name__ == '__main__':
     app_stop_cmd.add_argument('app_id')
     app_update_cmd = subparsers.add_parser('app-update')
     app_update_cmd.add_argument('app_id')
-    app_backup_cmd = subparsers.add_parser('app-backup')
-    app_backup_cmd.add_argument('app_id')
+
+    # TODO: document: commands where there is risk to loose something create an automatic backup
+    # TODO: document: some commands stop and then restart the app.
+
+    def app_backup_cmd(manager, args):
+        app = manager.apps[args.app_id]
+        app.backup()
+
+    def app_restore_cmd(manager, args):
+        app = manager.apps[args.app_id]
+        app.restore(args.backup)
+
+    cmd = subparsers.add_parser(
+        'app-backup',
+        description="""Backup the data of an app.
+
+        The backup is stored at {wam-data-dir}/backups/backup-{app-id}-{timestamp} .
+        """)
+    cmd.set_defaults(run=app_backup_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+    cmd = subparsers.add_parser(
+        'app-restore',
+        description="""Restore the (backup) data for an app.""")
+    cmd.set_defaults(run=app_restore_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+    cmd.add_argument('backup', help='Path to the backup directory that holds the data to restore.')
 
     # extensions
     def protect_app(manager, args):
         app = manager.apps[args.app_id]
         ProtectApp(app).protect(args.password)
+
     protect_app_cmd = subparsers.add_parser('protect-app')
     protect_app_cmd.set_defaults(run=protect_app)
     protect_app_cmd.add_argument('app_id')
@@ -1082,14 +1141,10 @@ if __name__ == '__main__':
     elif args.cmd == 'app-stop':
         app = manager.apps[args.app_id]
         app.stop()
-    elif args.cmd == 'app-backup':
-        app = manager.apps[args.app_id]
-        app.backup()
     elif args.cmd == 'app-update':
         app = manager.apps[args.app_id]
         app.update()
     else:
-        print(args)
         args.run(manager, args)
 
     # TODO exec command
