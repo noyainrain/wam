@@ -5,7 +5,7 @@
 import os
 import json
 from tempfile import NamedTemporaryFile, mkdtemp, mktemp
-from subprocess import CalledProcessError, call, check_call
+from subprocess import CalledProcessError, call, check_call, check_output
 from contextlib import contextmanager
 from shutil import copyfile
 from unittest import TestCase
@@ -39,6 +39,14 @@ class WamTestCase(TestCase):
         with tmp_software(meta) as software_id:
             app = self.manager.add(software_id, 'localhoax')
             yield app
+
+    @staticmethod
+    def sign_csr(csr):
+        cakey = '/tmp/ca.key'
+        certificate = '/tmp/certificate.crt'
+        check_output(['openssl', 'genpkey', '-algorithm', 'RSA', '-out', cakey])
+        check_output(['openssl', 'x509', '-req', '-in', csr, '-signkey', cakey, '-out', certificate])
+        return certificate
 
 def process_exists(pid):
     try:
@@ -117,15 +125,6 @@ class AppTest(WamTestCase):
         self.app.stop_all_jobs()
         self.assertFalse(self.app.pids)
 
-    def test_update_code(self):
-        with self.tmp_app({'download': '.'}) as app:
-            self.assertTrue(os.path.isfile(os.path.join(app.path, 'wam.py')))
-
-    def test_update_code_repo_exists(self):
-        with self.tmp_app({'download': '.'}) as app:
-            # NOTE: better test would be to commit something and then test if it is fetched
-            app.update()
-
     #def test_install(self):
     #    self.app.install('apt', {'python3-yapsy'})
     #    self.assertIn('python3-yapsy', self.app.installed_packages['apt'])
@@ -182,9 +181,46 @@ class AppTest(WamTestCase):
             self.assertTrue(os.path.isfile(os.path.join(app.path, 'a/test.json')))
             self.assertFalse(os.path.exists(os.path.join(app.path, 'a/Gemfile')))
 
+    def test_encrypt(self):
+        csr = self.app.encrypt()
+        self.assertFalse(self.app.encrypted)
+        # TODO: somehow validate csr??
+
+    def test_encrypt2(self):
+        certificate = self.sign_csr(self.app.encrypt())
+        self.app.encrypt2(certificate)
+        self.assertTrue(self.app.encrypted)
+
     def _copy_to_data_dir(self, app, file, data_dir):
         check_call(['sudo', '-u', app.job_user, 'cp', os.path.join(RES_PATH, file),
                     os.path.join(app.path, data_dir, file)])
+
+class AppUpdateCodeTest(WamTestCase):
+    def setUp(self):
+        super().setUp()
+        self.remote = mkdtemp()
+        check_output(['git', 'clone', '-q', '.', self.remote])
+
+    def commit(self, text):
+        with open(os.path.join(self.remote, 'wam.py'), 'a') as f:
+            f.write(text + '\n')
+        check_output(['git', '-C', self.remote, 'commit', '-am', 'Add stuff'])
+
+    def test_update_code(self):
+        with self.tmp_app({'download': self.remote}) as app:
+            self.assertTrue(os.path.isfile(os.path.join(app.path, 'wam.py')))
+
+    def test_update_code_remote_changes(self):
+        with self.tmp_app({'download': self.remote}) as app:
+            self.commit('# foo')
+            app.update()
+
+    def test_update_code_local_changes(self):
+        with self.tmp_app({'download': self.remote}) as app:
+            self.commit('# foo')
+            with open(os.path.join(app.path, 'wam.py'), 'a') as f:
+                f.write('# bar\n')
+            app.update()
 
 @contextmanager
 def tmp_software(meta):
@@ -225,8 +261,24 @@ class NginxTest(WamTestCase):
     def test_configure(self):
         with self.tmp_app():
             self.manager.nginx.configure()
-            self.assertFalse(call(['sudo', 'nginx', '-c', os.path.abspath('res/nginx.conf'),
-                                   '-t']))
+            self.assertGoodConfig()
+
+    def test_configure_ssl(self):
+        # XXX: somehow nginx doesnt like our self-signed certificate. what are we doing wrong?
+        return
+
+        with self.tmp_app() as app:
+            csr = app.encrypt()
+            certificate = self.sign_csr(csr)
+            app.encrypt2(certificate)
+
+            check_call(['cat', '/tmp/wam.conf'])
+            self.manager.nginx.configure()
+            self.assertGoodConfig()
+
+    def assertGoodConfig(self):
+        if call(['sudo', 'nginx', '-c', os.path.abspath('res/nginx.conf'), '-t']):
+            raise AssertionError('bad_nginx_config')
 
 #class PackageEngineTestMixin:
 #    def test_install(self):

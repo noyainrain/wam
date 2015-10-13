@@ -9,6 +9,7 @@ import json
 import subprocess
 import logging
 import shlex
+import argparse
 from time import sleep
 from subprocess import Popen, CalledProcessError, check_call, check_output
 from shutil import copyfile, copytree, make_archive
@@ -28,12 +29,27 @@ _NGINX_SERVER_TEMPLATE = """\
 server {{
     listen {port};
     server_name {host};
+{ssl_config}
     location / {{
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_pass http://localhost:{app_port};
     }}
+}}
+{ssl_redirect_config}
+"""
+
+_NGINX_SSL_TEMPLATE = """
+    ssl_certificate {app_certificate};
+    ssl_certificate_key {app_certificate_key};
+"""
+
+_NGINX_SSL_REDIRECT_TEMPLATE = """
+server {{
+    listen 80;
+    server_name {host};
+    return 301 https://{host};
 }}
 """
 
@@ -71,6 +87,7 @@ class WebAppManager:
         self.data_path = self.config['data_path']
         self.store_path = os.path.join(self.data_path, 'wam.json')
         self.backup_path = os.path.join(self.data_path, 'backups')
+        self.ssl_path = os.path.join(self.data_path, 'ssl')
         self.ext_path = os.path.join(self.data_path, 'ext')
         self.auto_backup = auto_backup
 
@@ -103,7 +120,7 @@ class WebAppManager:
         }
 
     def start(self):
-        for d in [self.data_path, self.backup_path, self.ext_path]:
+        for d in [self.data_path, self.backup_path, self.ssl_path, self.ext_path]:
             try:
                 os.mkdir(d)
             except FileExistsError:
@@ -152,9 +169,6 @@ class WebAppManager:
 
     def add(self, software_id, url, rollback=True):
         """
-        add / activate instance of app at url.
-        `app_id` is an identifier, either known to system or an webapp meta file or
-        an HTTP URL pointing to a webapp meta file
         """
 
         if not os.path.isfile(software_id):
@@ -347,6 +361,8 @@ class App:
             check_call(cmd)
         else:
             self._logger.info('Pulling from %s', url)
+            # Discard all local changes to prevent merge problems
+            check_call(['git', '-C', self.path, 'reset', '--hard'])
             check_call(['git', '-C', self.path, 'fetch'])
             check_call(['git', '-C', self.path, 'merge'])
 
@@ -520,12 +536,15 @@ class App:
 
     def start_job(self, cmd, env={}, cwd=None):
         args = shlex.split(cmd)
-        args = ['sudo', '-u', self.job_user] + args
+        args = ['sudo', '-u', self.job_user, 'nohup'] + args
         envi = dict(os.environ)
         envi.update(env)
         #print(args)
         #print(envi)
-        p = Popen(args, env=envi, cwd=cwd)
+        # TODO: How to fix buffering?
+        with open(os.path.join(self.path, 'log.txt'), 'a') as f:
+            f.write('\n{}\n{}\n'.format(datetime.utcnow().isoformat(), ' '.join(args)))
+            p = Popen(args, stdin=subprocess.DEVNULL, stdout=f, stderr=f, cwd=cwd, env=envi)
         self.pids.add(p.pid)
         self.manager.store()
         return p.pid
@@ -560,6 +579,7 @@ class App:
         self.manager.store()
 
     def encrypt(self):
+        """See :ref:`wam app-encrypt`."""
         """
 export DOMAIN=foo.inrain.org
 # generate private key
@@ -579,12 +599,11 @@ openssl x509 -in $DOMAIN.crt -text
         csr_path = os.path.join(self.wam.config['data_path'], 'ssl', self.id + '.csr')
         call('openssl req -new -key {} -subj / -out {}'.format(
             self.certificate_key_path, csr_path))
-        # TODO: return what? better csr blob?
         return csr_path
 
     def encrypt2(self, certificate):
-        with open(self.certificate_path, 'w') as f:
-            f.write(certificate)
+        """See :ref:`wam app-encrypt2`."""
+        copyfile(certificate, self.certificate_path)
         # TODO: validate certificate somehow
         call('openssl x509 -in {} -text'.format(self.certificate_path))
         self.manager.nginx.configure()
@@ -775,9 +794,23 @@ class Nginx:
     def configure(self):
         servers = []
         for app in self.manager.apps.values():
-            servers.append(_NGINX_SERVER_TEMPLATE.format(port=80, host=app.id, app_port=app.port))
+            port = '80'
+            ssl_config = ''
+            ssl_redirect_config = ''
+            if app.encrypted:
+                port = '443 ssl'
+                ssl_config = _NGINX_SSL_TEMPLATE.format(
+                    app_certificate=os.path.abspath(app.certificate_path),
+                    app_certificate_key=os.path.abspath(app.certificate_key_path))
+                ssl_redirect_config = _NGINX_SSL_REDIRECT_TEMPLATE.format(host=app.id)
+
+            servers.append(_NGINX_SERVER_TEMPLATE.format(
+                host=app.id, port=port, app_port=app.port, ssl_config=ssl_config,
+                ssl_redirect_config=ssl_redirect_config))
+
         with open(self.config_path, 'w') as f:
             f.write('\n'.join(servers))
+
         check_call(['sudo', 'systemctl', 'reload', 'nginx'])
 
 class PackageEngine:
@@ -1068,33 +1101,84 @@ if __name__ == '__main__':
     #    print('run as www-data, please')
     #    sys.exit()
 
-    parser = ArgumentParser()
+    parser = ArgumentParser(argument_default=argparse.SUPPRESS)
     #parser.add_argument('command', choices=['add', 'remove'])
     parser.add_argument('-v', '--verbose', action='store_true')
-    subparsers = parser.add_subparsers(dest='cmd')
-    add_cmd = subparsers.add_parser('add')
-    add_cmd.add_argument('software_id')
-    add_cmd.add_argument('url')
-    add_cmd.add_argument('--no-rollback', dest='rollback', action='store_false')
-    remove_cmd = subparsers.add_parser('remove')
-    remove_cmd.add_argument('app_id')
-    app_start_cmd = subparsers.add_parser('app-start')
-    app_start_cmd.add_argument('app_id')
-    app_stop_cmd = subparsers.add_parser('app-stop')
-    app_stop_cmd.add_argument('app_id')
-    app_update_cmd = subparsers.add_parser('app-update')
-    app_update_cmd.add_argument('app_id')
+    subparsers = parser.add_subparsers()
 
     # TODO: document: commands where there is risk to loose something create an automatic backup
     # TODO: document: some commands stop and then restart the app.
 
-    def app_backup_cmd(manager, args):
-        app = manager.apps[args.app_id]
-        app.backup()
+    def add_cmd(manager, software_id, url, **opts):
+        manager.add(software_id, url, **opts)
 
-    def app_restore_cmd(manager, args):
-        app = manager.apps[args.app_id]
-        app.restore(args.backup)
+    # TODO: rename into remove_cmd
+    def app_remove_cmd(manager, app_id):
+        app = manager.apps[app_id]
+        manager.remove(app)
+
+    def app_update_cmd(manager, app_id):
+        app = manager.apps[app_id]
+        app.update()
+
+    def app_start_cmd(manager, app_id):
+        app = manager.apps[app_id]
+        app.start()
+
+    def app_stop_cmd(manager, app_id):
+        app = manager.apps[app_id]
+        app.stop()
+
+    def app_backup_cmd(manager, app_id):
+        app = manager.apps[app_id]
+        backup = app.backup()
+        print('Backup created at: {}'.format(backup))
+
+    def app_restore_cmd(manager, app_id, backup):
+        app = manager.apps[app_id]
+        app.restore(backup)
+
+    def app_encrypt_cmd(manager, app_id):
+        app = manager.apps[app_id]
+        csr = app.encrypt()
+        print('Certificate signing request created at: {}'.format(csr))
+        print('Please submit it to your CA and then call app-encrypt2 with the signed certificate.')
+
+    def app_encrypt2_cmd(manager, app_id, certificate):
+        app = manager.apps[app_id]
+        app.encrypt2(certificate)
+
+    cmd = subparsers.add_parser(
+        'add',
+        description="""Add an app at a given URL.""")
+    cmd.set_defaults(run=add_cmd)
+    cmd.add_argument('software_id', help='TODO. webappmetafile')
+    cmd.add_argument('url', help='TODO.')
+    cmd.add_argument('--no-rollback', dest='rollback', action='store_false', help='TODO.')
+
+    cmd = subparsers.add_parser(
+        'remove',
+        description="""Remove the app.""")
+    cmd.set_defaults(run=app_remove_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+
+    cmd = subparsers.add_parser(
+        'app-update',
+        description="""Update the app.""")
+    cmd.set_defaults(run=app_update_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+
+    cmd = subparsers.add_parser(
+        'app-start',
+        description="""TODO.""")
+    cmd.set_defaults(run=app_start_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+
+    cmd = subparsers.add_parser(
+        'app-stop',
+        description="""TODO.""")
+    cmd.set_defaults(run=app_stop_cmd)
+    cmd.add_argument('app_id',help='App ID.')
 
     cmd = subparsers.add_parser(
         'app-backup',
@@ -1104,12 +1188,30 @@ if __name__ == '__main__':
         """)
     cmd.set_defaults(run=app_backup_cmd)
     cmd.add_argument('app_id', help='App ID.')
+
     cmd = subparsers.add_parser(
         'app-restore',
         description="""Restore the (backup) data for an app.""")
     cmd.set_defaults(run=app_restore_cmd)
     cmd.add_argument('app_id', help='App ID.')
     cmd.add_argument('backup', help='Path to the backup directory that holds the data to restore.')
+
+    cmd = subparsers.add_parser(
+        'app-encrypt',
+        description="""Enable SSL encryption for the app.
+
+        The first step creates a certificate signing request, ready to be submitted to a CA.""")
+    cmd.set_defaults(run=app_encrypt_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+
+    cmd = subparsers.add_parser(
+        'app-encrypt2',
+        description="""Enable SSL encryption for the app.
+
+        The second and last step applies the signed certificate.""")
+    cmd.set_defaults(run=app_encrypt2_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+    cmd.add_argument('certificate', help='Path of the signed certificate file.')
 
     # extensions
     def protect_app(manager, args):
@@ -1121,31 +1223,18 @@ if __name__ == '__main__':
     protect_app_cmd.add_argument('app_id')
     protect_app_cmd.add_argument('password')
 
-    args = parser.parse_args()
+    args = vars(parser.parse_args())
     #print(args)
 
-    level = logging.DEBUG if args.verbose else logging.INFO
+    verbose = args.pop('verbose', False)
+    level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level)
 
     manager = WebAppManager()
     manager.start()
 
-    if args.cmd == 'add':
-        manager.add(args.software_id, args.url, rollback=args.rollback)
-    elif args.cmd == 'remove':
-        app = manager.apps[args.app_id]
-        manager.remove(app)
-    elif args.cmd == 'app-start':
-        app = manager.apps[args.app_id]
-        app.start()
-    elif args.cmd == 'app-stop':
-        app = manager.apps[args.app_id]
-        app.stop()
-    elif args.cmd == 'app-update':
-        app = manager.apps[args.app_id]
-        app.update()
-    else:
-        args.run(manager, args)
+    run = args.pop('run')
+    run(manager, **args)
 
     # TODO exec command
 
@@ -1157,19 +1246,6 @@ if __name__ == '__main__':
     # the board is dead long live the board
     #app = ProtectApp(app)
     #app.protect('tbidlltb')
-
-    # cmd: app-encrypt <id>
-    # step1
-    #csr_path = app.encrypt()
-    #print('certificate signing request: {}'.format(csr_path))
-    #print('please submit it and call encrypt2 with certificate')
-
-    # cmd: app-encrypt2 <id> <certificate-path>
-    # step2
-    #certificate_path = 'foo.crt'
-    #with open(certificate_path) as f:
-    #    certificate = f.read()
-    #app.encrypt2(certificate)
 
     # highly dangerous now!!!
     #if 'humhub.inrain.org' in wam.apps:

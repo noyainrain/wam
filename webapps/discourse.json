@@ -1,5 +1,5 @@
 {
-    "download": "https://github.com/discourse/discourse.git#stable",
+    "download": "https://github.com/discourse/discourse.git#beta",
     "packages": {
         "apt": ["postgresql-contrib", "libpq-dev", "libxml2", "imagemagick"],
         "bundler": []
