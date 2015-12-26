@@ -11,6 +11,7 @@ import logging
 import shlex
 import argparse
 from time import sleep
+from collections.abc import Mapping
 from subprocess import Popen, CalledProcessError, check_call, check_output
 from shutil import copyfile, copytree, make_archive
 from random import choice
@@ -53,6 +54,23 @@ server {{
 }}
 """
 
+class Registry(Mapping):
+    def __init__(self):
+        self._cache = {}
+
+    def __getitem__(self, key):
+        if key not in self._cache:
+            with open(key) as f:
+                meta = json.load(f)
+                self._cache[key] = meta
+        return self._cache[key]
+
+    def __iter__(self):
+        raise NotImplementedError()
+
+    def __len__(self):
+        raise NotImplementedError()
+
 class WebAppManager:
     """
     Attributes:
@@ -68,6 +86,10 @@ class WebAppManager:
     .. attribute: port_range
 
        See ``port_range`` configuration.
+
+    .. attribute: meta
+
+       Software meta data :class:`Registry`.
 
     .. attribute: nginx
 
@@ -98,6 +120,7 @@ class WebAppManager:
         if not (len(self.port_range) == 2 and self.port_range[0] < self.port_range[1]):
             raise ValueError('port_range')
 
+        self.meta = Registry()
         self.apps = {}
         args = {}
         if 'nginx_config_path' in kwargs:
@@ -167,7 +190,7 @@ class WebAppManager:
         else:
             return json
 
-    def add(self, software_id, url, rollback=True):
+    def add(self, software_id, url, branch=None, rollback=True):
         """
         """
 
@@ -181,7 +204,8 @@ class WebAppManager:
         port = sorted(free_ports)[0]
 
         secret = randstr()
-        app = App(url, software_id, port, secret, {}, {}, set(), wam=self)
+        app = App(url, software_id, port, secret, {}, {}, set(), extensions=[], wam=self,
+                  branch=branch)
         self.apps[app.id] = app
         mkdir(app.path)
         self.nginx.configure()
@@ -229,6 +253,7 @@ class App:
 
     * `id`
     * `software_id`
+    * `branch`
     * `software_meta`: Description of the software as given in software's
       `webapp.json`.
     * `secret`
@@ -243,14 +268,16 @@ class App:
        Port the web server uses to communicate with the application server.
     """
 
-    def __init__(self, id, software_id, port, secret, jobs, installed_packages, databases, wam,
-                 data_dirs=set(), pids=set()):
+    def __init__(self, id, software_id, port, secret, jobs, installed_packages, databases,
+                 extensions, wam, data_dirs=set(), pids=set(), **args):
         self.id = id
         self.software_id = software_id
+        self.branch = args['branch']
         self.port = port
         self.secret = secret
         self.installed_packages = installed_packages
         self.databases = databases
+        self.extensions = extensions
         self.data_dirs = data_dirs
         self.jobs = jobs
         self.pids = pids
@@ -274,6 +301,7 @@ class App:
             self._software_meta['jobs'] = list(
                 {'cmd': j} if isinstance(j, str) else j for j in
                 self._software_meta.get('jobs', []))
+            self._software_meta.setdefault('extension_path', 'ext')
         return self._software_meta
     meta=software_meta
 
@@ -344,27 +372,34 @@ class App:
         except KeyError:
             return
 
+        self._update_repo(self.path, url, branch=self.branch)
+        for extension in self.extensions:
+            # TODO: remove extension again if needed
+            path = os.path.join(self.path, self.meta['extension_path'], extension.replace('/', '-'))
+            self._update_repo(path, self.manager.meta[extension]['download'])
+
+    def _update_repo(self, repo, url, branch=None):
         try:
-            git_root = (check_output(['git', '-C', self.path, 'rev-parse', '--show-toplevel'])
+            git_root = (check_output(['git', '-C', repo, 'rev-parse', '--show-toplevel'])
                         .decode().strip())
         except CalledProcessError:
             git_root = None
-        # git_root is always absolute, self.path may or may not be
-        repo_exists = (git_root == os.path.abspath(self.path))
+        # git_root is always absolute, repo may or may not be
+        repo_exists = (git_root == os.path.abspath(repo))
 
         if not repo_exists:
-            self._logger.info('Cloning from %s', url)
-            url, branch = urldefrag(url)
-            cmd = ['git', 'clone', '-q', '--single-branch', url, self.path]
+            self._logger.info('Cloning from %s%s', url, '#' + branch if branch else '')
+            #url, branch = urldefrag(url)
+            cmd = ['git', 'clone', '-q', '--single-branch', url, repo]
             if branch:
                 cmd[4:4] = ['-b', branch]
             check_call(cmd)
         else:
             self._logger.info('Pulling from %s', url)
             # Discard all local changes to prevent merge problems
-            check_call(['git', '-C', self.path, 'reset', '--hard'])
-            check_call(['git', '-C', self.path, 'fetch'])
-            check_call(['git', '-C', self.path, 'merge'])
+            check_call(['git', '-C', repo, 'reset', '--hard'])
+            check_call(['git', '-C', repo, 'fetch'])
+            check_call(['git', '-C', repo, 'merge'])
 
     def _update_packages(self):
         # TODO: Skip already installed packages
@@ -608,6 +643,21 @@ openssl x509 -in $DOMAIN.crt -text
         call('openssl x509 -in {} -text'.format(self.certificate_path))
         self.manager.nginx.configure()
 
+    def add_extension(self, extension):
+        if extension in self.extensions:
+            raise ValueError('extension') #TODO
+        if not os.path.isfile(extension):
+            raise ValueError('extension_not_found') #TODO
+        self.extensions.append(extension)
+        self.update()
+
+    def remove_extension(self, extension):
+        try:
+            self.extensions.remove(extension)
+        except ValueError:
+            raise ValueError('extension') # TODO
+        self.update()
+
     def _call(self, op):
         try:
             script = os.path.join(os.path.dirname(self.software_id), self.meta['hooks'])
@@ -761,8 +811,8 @@ openssl x509 -in $DOMAIN.crt -text
         return None
 
     def json(self):
-        attrs = ['id', 'software_id', 'port', 'secret', 'jobs', 'data_dirs', 'databases',
-                 'installed_packages', 'pids']
+        attrs = ['id', 'software_id', 'branch', 'port', 'secret', 'jobs', 'data_dirs', 'databases',
+        'extensions', 'installed_packages', 'pids']
         json = {a: getattr(self, a) for a in attrs}
         #json['jobs'] = [j.json() for j in self.jobs.values()]
         #json['installed_packages'] = {e: list(p) for e, p
@@ -1148,12 +1198,21 @@ if __name__ == '__main__':
         app = manager.apps[app_id]
         app.encrypt2(certificate)
 
+    def app_add_extension_cmd(manager, app_id, extension_id):
+        app = manager.apps[app_id]
+        app.add_extension(extension_id)
+
+    def app_remove_extension_cmd(manager, app_id, extension_id):
+        app = manager.apps[app_id]
+        app.remove_extension(extension_id)
+
     cmd = subparsers.add_parser(
         'add',
         description="""Add an app at a given URL.""")
     cmd.set_defaults(run=add_cmd)
     cmd.add_argument('software_id', help='TODO. webappmetafile')
     cmd.add_argument('url', help='TODO.')
+    cmd.add_argument('--branch', help='TODO.')
     cmd.add_argument('--no-rollback', dest='rollback', action='store_false', help='TODO.')
 
     cmd = subparsers.add_parser(
@@ -1212,6 +1271,16 @@ if __name__ == '__main__':
     cmd.set_defaults(run=app_encrypt2_cmd)
     cmd.add_argument('app_id', help='App ID.')
     cmd.add_argument('certificate', help='Path of the signed certificate file.')
+
+    cmd = subparsers.add_parser('app-add-extension', description='TODO')
+    cmd.set_defaults(run=app_add_extension_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+    cmd.add_argument('extension_id', help='TODO')
+
+    cmd = subparsers.add_parser('app-remove-extension', description='TODO')
+    cmd.set_defaults(run=app_remove_extension_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+    cmd.add_argument('extension_id', help='TODO')
 
     # extensions
     def protect_app(manager, args):

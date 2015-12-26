@@ -191,6 +191,21 @@ class AppTest(WamTestCase):
         self.app.encrypt2(certificate)
         self.assertTrue(self.app.encrypted)
 
+    def test_add_extension(self):
+        with self.tmp_app({'download': '.'}) as app, tmp_software({'download': '.'}) as extension:
+            app.add_extension(extension)
+            self.assertIn(extension, app.extensions)
+            # TODO: better test this part in update code with extension test????
+            path = os.path.join(app.path, 'ext', extension.replace('/', '-'), 'wam.py')
+            self.assertTrue(os.path.isfile(path))
+
+    def test_remove_extension(self):
+        with self.tmp_app({'download': '.'}) as app, tmp_software({'download': '.'}) as extension:
+            app.add_extension(extension)
+            app.remove_extension(extension)
+            self.assertNotIn(extension, app.extensions)
+            # TODO: remove extdir again?
+
     def _copy_to_data_dir(self, app, file, data_dir):
         check_call(['sudo', '-u', app.job_user, 'cp', os.path.join(RES_PATH, file),
                     os.path.join(app.path, data_dir, file)])
@@ -200,6 +215,7 @@ class AppUpdateCodeTest(WamTestCase):
         super().setUp()
         self.remote = mkdtemp()
         check_output(['git', 'clone', '-q', '.', self.remote])
+        check_output(['git', '-C', self.remote, 'branch', 'test'])
 
     def commit(self, text):
         with open(os.path.join(self.remote, 'wam.py'), 'a') as f:
@@ -208,6 +224,11 @@ class AppUpdateCodeTest(WamTestCase):
 
     def test_update_code(self):
         with self.tmp_app({'download': self.remote}) as app:
+            self.assertTrue(os.path.isfile(os.path.join(app.path, 'wam.py')))
+
+    def test_update_code_branch_test(self):
+        with tmp_software({'download': self.remote}) as software_id:
+            app = self.manager.add(software_id, 'localhoax', branch='test')
             self.assertTrue(os.path.isfile(os.path.join(app.path, 'wam.py')))
 
     def test_update_code_remote_changes(self):
