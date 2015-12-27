@@ -338,9 +338,12 @@ class App:
 
     @property
     def data(self):
+        # TODO: we dont need this anymore, how awesome, we can just pass the app object to
+        # templates, yehaaaa
         return {
             'port': self.port,
-            'path': self.path
+            'path': self.path,
+            'databases': list(self.databases)
         }
 
     def update(self, fresh=False):
@@ -812,7 +815,7 @@ openssl x509 -in $DOMAIN.crt -text
 
     def json(self):
         attrs = ['id', 'software_id', 'branch', 'port', 'secret', 'jobs', 'data_dirs', 'databases',
-        'extensions', 'installed_packages', 'pids']
+                 'extensions', 'installed_packages', 'pids']
         json = {a: getattr(self, a) for a in attrs}
         #json['jobs'] = [j.json() for j in self.jobs.values()]
         #json['installed_packages'] = {e: list(p) for e, p

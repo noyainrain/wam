@@ -5,5 +5,5 @@
         "bower": []
     },
     "databases": ["redis"],
-    "jobs": [{"cmd": "python3 -m meetling --port {port}", "cwd": "{path}"}]
+    "jobs": [{"cmd": "python3 -m meetling --redis-url={databases[0].name} --port {port}", "cwd": "{path}"}]
 }
