@@ -156,14 +156,18 @@ class AppTest(WamTestCase):
 
     def test_update_data_dirs_changed(self):
         with self.tmp_app({'data_dirs': ['a', 'b']}) as app:
+
             # XXX what an ugly hack... please add a cool way to update software meta file
-            self.app._software_meta = json.loads('{"data_dirs": ["b", "c"]}')
+            with open(app.software_id, 'w') as f:
+                f.write('{"data_dirs": ["b", "c"]}')
+            app._software_meta = None
+
             data_dirs = {'b', 'c'}
-            self.app.update()
-            self.assertEqual(self.app.data_dirs, data_dirs)
-            self.assertFalse(os.path.exists(os.path.join(self.app.path, 'a')))
+            app.update()
+            self.assertEqual(app.data_dirs, data_dirs)
+            self.assertFalse(os.path.exists(os.path.join(app.path, 'a')))
             for data_dir in data_dirs:
-                self.assertEqual(os.stat(os.path.join(self.app.path, data_dir)).st_uid, 33)
+                self.assertEqual(os.stat(os.path.join(app.path, data_dir)).st_uid, 33)
 
     def test_backup(self):
         with self.tmp_app({'databases': ['postgresql'], 'data_dirs': ['a', 'b']}) as app:

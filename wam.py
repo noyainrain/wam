@@ -296,12 +296,22 @@ class App:
     @property
     def software_meta(self):
         if not self._software_meta:
+            self._software_meta = {
+                'download': None, # TODO: must be set?
+                'stack': [],
+                'packages': {},
+                'databases': [],
+                'data_dirs': [],
+                'jobs': [],
+                'hooks': None,
+                'extension_path': 'ext'
+            }
             with open(self.software_id) as f:
-                self._software_meta = json.load(f)
+                meta = json.load(f)
+                self._software_meta.update(meta)
             self._software_meta['jobs'] = list(
                 {'cmd': j} if isinstance(j, str) else j for j in
-                self._software_meta.get('jobs', []))
-            self._software_meta.setdefault('extension_path', 'ext')
+                    self._software_meta.get('jobs', []))
         return self._software_meta
     meta=software_meta
 
@@ -370,9 +380,8 @@ class App:
     def _update_code(self):
         self._logger.info('Updating code')
 
-        try:
-            url = self.meta['download']
-        except KeyError:
+        url = self.meta['download']
+        if not url:
             return
 
         self._update_repo(self.path, url, branch=self.branch)
@@ -391,8 +400,9 @@ class App:
         repo_exists = (git_root == os.path.abspath(repo))
 
         if not repo_exists:
+            url, default_branch = urldefrag(url)
+            branch = branch or default_branch
             self._logger.info('Cloning from %s%s', url, '#' + branch if branch else '')
-            #url, branch = urldefrag(url)
             cmd = ['git', 'clone', '-q', '--single-branch', url, repo]
             if branch:
                 cmd[4:4] = ['-b', branch]
@@ -662,10 +672,10 @@ openssl x509 -in $DOMAIN.crt -text
         self.update()
 
     def _call(self, op):
-        try:
-            script = os.path.join(os.path.dirname(self.software_id), self.meta['hooks'])
-        except KeyError:
+        if not self.meta['hooks']:
             return
+
+        script = os.path.join(os.path.dirname(self.software_id), self.meta['hooks'])
 
         env = dict(os.environ)
         env.update({
