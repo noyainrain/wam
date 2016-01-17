@@ -9,7 +9,7 @@ from subprocess import CalledProcessError, call, check_call, check_output
 from contextlib import contextmanager
 from shutil import copyfile
 from unittest import TestCase
-from wam import WebAppManager, Apt, Bundler, Bower, PostgreSQL, Database, ScriptError
+from wam import WebAppManager, Apt, Bundler, Bower, PostgreSQL, MySQL, Database, ScriptError
 
 RES_PATH = os.path.join(os.path.dirname(__file__), 'res')
 
@@ -128,6 +128,10 @@ class AppTest(WamTestCase):
     #def test_install(self):
     #    self.app.install('apt', {'python3-yapsy'})
     #    self.assertIn('python3-yapsy', self.app.installed_packages['apt'])
+
+    def test_update_stack(self):
+        with self.tmp_app({'stack': ['python3']}) as app:
+            self.assertEqual(call(['which', 'pip3']), 0)
 
     def test_update_packages(self):
         meta = {
@@ -335,6 +339,7 @@ class BowerTest(TestCase):
 class DatabaseEngineTestMixin:
     def setUp(self, engine):
         self.engine = engine
+        self.engine.setup()
         try:
             self.database = self.engine.create('litterbox', 'cat', 'secr3t')
         except:
@@ -369,6 +374,13 @@ class DatabaseEngineTestMixin:
 class PostgreSQLTest(TestCase, DatabaseEngineTestMixin):
     def setUp(self):
         DatabaseEngineTestMixin.setUp(self, PostgreSQL())
+
+    def tearDown(self):
+        DatabaseEngineTestMixin.tearDown(self)
+
+class MySQLTest(TestCase, DatabaseEngineTestMixin):
+    def setUp(self):
+        DatabaseEngineTestMixin.setUp(self, MySQL())
 
     def tearDown(self):
         DatabaseEngineTestMixin.tearDown(self)

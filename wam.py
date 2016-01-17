@@ -11,6 +11,7 @@ import logging
 import shlex
 import argparse
 from time import sleep
+from itertools import chain
 from collections.abc import Mapping
 from subprocess import Popen, CalledProcessError, check_call, check_output
 from shutil import copyfile, copytree, make_archive
@@ -130,17 +131,20 @@ class WebAppManager:
         self.logger = logging.getLogger('wam')
         self._logger = self.logger
 
-        self._package_engines = {'apt': Apt(), 'bundler': Bundler(), 'bower': Bower()}
+        self.package_engines = {'apt': Apt(), 'bundler': Bundler(), 'bower': Bower()}
         def get_redis_databases():
             #for app in self.apps:
             #    for database in app.databases:
             #        if database.engine == 'redis':
             #            return database
             return {d for a in self.apps.values() for d in a.databases if d.engine == 'redis'}
-        self._database_engines = {
+        self.database_engines = {
             'postgresql': PostgreSQL(),
             'redis': Redis(get_redis_databases)
         }
+        # TODO: remove this, just for backwards compatibility
+        self._package_engines = self.package_engines
+        self._database_engines = self.database_engines
 
     def start(self):
         for d in [self.data_path, self.backup_path, self.ssl_path, self.ext_path]:
@@ -368,6 +372,7 @@ class App:
                 self.backup()
 
         self._update_code()
+        self._update_stack()
         self._update_packages()
         self._update_databases()
         self._update_data_dirs()
@@ -414,6 +419,17 @@ class App:
             check_call(['git', '-C', repo, 'fetch'])
             check_call(['git', '-C', repo, 'merge'])
 
+    def _update_stack(self):
+        # Stack = runtime + package manager
+        self._logger.info('Updating stack')
+        # js: (nodejs-legacy, npm + npm->bower) here we would have to implement class Npm also
+        alias = {
+            'php5': ['php5-fpm'],
+            'python3': ['python3-pip']
+        }
+        packages = set(chain.from_iterable(alias[s] for s in self.meta['stack']))
+        self.install('apt', packages)
+
     def _update_packages(self):
         # TODO: Skip already installed packages
         # TODO: Remove packages
@@ -430,6 +446,7 @@ class App:
             # TODO: Delete databases
             pass
         for engine in new:
+            self.database_engines[engine].setup()
             self.create_database(engine)
 
     def _update_data_dirs(self, cleanup=False):
@@ -766,14 +783,6 @@ openssl x509 -in $DOMAIN.crt -text
         self.databases.add(database)
         self.manager.store()
         return database
-        """#sql = _create_db_template.format(name=self.id, pw=self.secret)
-        c = db.cursor()
-        # TODO why does this not work with ?
-        c.execute('CREATE USER {}'.format(self.dbuser))
-        c.execute('CREATE DATABASE {}'.format(self.sid))
-        # mysql specific??
-        c.execute("GRANT ALL ON {}.* TO {} IDENTIFIED BY '{}'".format(self.sid, self.dbuser, self.secret))
-        db.close()"""
 
     def delete_database(self, database):
         self._logger.info('Deleting %s database', database.engine)
@@ -786,18 +795,6 @@ openssl x509 -in $DOMAIN.crt -text
     def delete_all_databases(self):
         for database in set(self.databases):
             self.delete_database(database)
-
-    """def _connect_db(self, engine):
-        if engine == 'mysql':
-            #from getpass import getpass
-            #print('please enter MySQL root password')
-            #pw = getpass()
-            from mysql import connector
-            db = connector.connect(user='root',
-                                   password=self.config['mysql_password'])
-        else:
-            raise ValueError('engine_unknown')
-        return db"""
 
     def pull(self):
         call('GIT_DIR={} GIT_WORK_TREE={} git pull'.format(
@@ -877,6 +874,7 @@ class Nginx:
         check_call(['sudo', 'systemctl', 'reload', 'nginx'])
 
 class PackageEngine:
+    # TODO: maybe packages should either be packages or a path to the app.....
     def install(self, packages, app_path):
         """Install a set of `packages` for the app located at `app_path`."""
         raise NotImplementedError()
@@ -913,6 +911,10 @@ class Bower(PackageEngine):
 
 class DatabaseEngine:
     id = None
+    dump_name = None
+
+    def setup(self):
+        pass
 
     def connect(self):
         raise NotImplementedError()
@@ -930,17 +932,17 @@ class DatabaseEngine:
         raise NotImplementedError()
 
 class SQLDatabaseEngine(DatabaseEngine):
+    create_user_query = None
+    grant_query = None
+
     def create(self, name, user, secret):
         db = self.connect()
-        # Some databases (e.g. PostgreSQL) don't like CREATE statements in
-        # transactions
+        # Some databases (like PostgreSQL) don't like CREATE statements in transactions
         db.autocommit = True
         c = db.cursor()
-        c.execute("CREATE USER {} PASSWORD '{}'".format(user, secret))
-        # TODO: mysql ON {}.* ??
-        # TODO: mysql IDENTIFIED BY '{}' ??
-        c.execute('CREATE DATABASE {}'.format(name))
-        c.execute('GRANT ALL ON DATABASE {} TO {}'.format(name, user))
+        c.execute(self.create_user_query.format(user=user, secret=secret))
+        c.execute("CREATE DATABASE {}".format(name))
+        c.execute(self.grant_query.format(name=name, user=user))
         db.close()
         return Database(self.id, name, user, secret)
 
@@ -964,7 +966,7 @@ class SQLDatabaseEngine(DatabaseEngine):
         c = db.cursor()
         c.execute('DROP DATABASE {}'.format(database.name))
         c.execute('CREATE DATABASE {}'.format(database.name))
-        c.execute('GRANT ALL ON DATABASE {} TO {}'.format(database.name, database.user))
+        c.execute(self.grant_query.format(name=database.name, user=database.user))
         db.close()
         self.do_restore(database, dump_path)
 
@@ -974,11 +976,16 @@ class SQLDatabaseEngine(DatabaseEngine):
 class PostgreSQL(SQLDatabaseEngine):
     id = 'postgresql'
     dump_name = 'postgresql.sql'
+    create_user_query = "CREATE USER {user} PASSWORD '{secret}'"
+    grant_query = "GRANT ALL ON DATABASE {name} TO {user}"
+
+    def setup(self):
+        # apt:postgresql, pip:psycopg2
+        pass
 
     def connect(self):
         import psycopg2
-        db = psycopg2.connect(database='postgres')
-        return db
+        return psycopg2.connect(database='postgres')
 
     def dump(self, database, path):
         check_call(['pg_dump', '-O', '-f', os.path.join(path, self.dump_name), database.name])
@@ -991,22 +998,46 @@ class PostgreSQL(SQLDatabaseEngine):
         check_call(['psql', '-h', 'localhost', '-f', dump_path, database.name, database.user],
                    env=env)
 
-class MySQL(SQLDatabaseEngine):
-    # TODO
-    def connect(self):
-        # TODO: test
-        import mysql.connector
-        db = mysql.connector.connect(user='root',
-                                     password=self.config['mysql_password'])
-        return db
+_MYSQL_CNF_TEMPLATE = """\
+[client]
+user = root
+password = {pw}
+"""
 
-    def dump(self, name, path):
-        # TODO: test
-        with open(os.path.join(path, 'mysql.sql'), 'w') as f:
-            check_call(['mysqldump', '-u', 'root', '-p' + self.config['mysql_password'], name], stdout=f)
-            #call('mysqldump -u {} -p{} {} > {}'.format(
-            #    self.dbuser, self.secret, self.sid,
-            #    os.path.join(self.path, 'dump.sql')))
+class MySQL(SQLDatabaseEngine):
+    id = 'mysql'
+    dump_name = 'mysql.sql'
+    create_user_query = "CREATE USER {user} IDENTIFIED BY '{secret}'"
+    grant_query = "GRANT ALL ON {name}.* TO {user}"
+
+    def setup(self):
+        try:
+            import mysql
+        except ImportError:
+            pw = randstr()
+            check_call([
+                'sudo', 'sh', '-c',
+                'echo mysql-server mysql-server/root_password password {} | debconf-set-selections'.format(pw)])
+            check_call([
+                'sudo', 'sh', '-c',
+                'echo mysql-server mysql-server/root_password_again password {} | debconf-set-selections'.format(pw)])
+            Apt().install({'mysql-server', 'python3-mysql.connector'}, None)
+            with open(os.path.expanduser('~/.my.cnf'), 'w') as f:
+                f.write(_MYSQL_CNF_TEMPLATE.format(pw=pw))
+
+    def connect(self):
+        from mysql import connector
+        return connector.connect(user='root', password='nazspuuckaeqdugq')
+        # XXX in v2 we can use the .my.cnf file:
+        #return connector.connect(option_files=os.path.expanduser('~/.my.cnf'))
+
+    def dump(self, database, path):
+        with open(os.path.join(path, self.dump_name), 'w') as f:
+            check_call(['mysqldump', database.name], stdout=f)
+
+    def do_restore(self, database, dump_path):
+        # TODO
+        pass
 
 class Redis(DatabaseEngine):
     id = 'redis'
@@ -1015,6 +1046,10 @@ class Redis(DatabaseEngine):
     def __init__(self, get_redis_databases):
         super().__init__()
         self.get_redis_databases = get_redis_databases
+
+    def setup(self):
+        # apt:redis-server, pip:redis
+        pass
 
     def create(self, name, user, secret):
         taken = {int(d.name) for d in self.get_redis_databases()}
