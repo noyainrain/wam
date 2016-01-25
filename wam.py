@@ -1086,9 +1086,10 @@ class MySQL(SQLDatabaseEngine):
 
     def connect(self):
         from mysql import connector
-        return connector.connect(user='root', password='nazspuuckaeqdugq')
         # XXX in v2 we can use the .my.cnf file:
         #return connector.connect(option_files=os.path.expanduser('~/.my.cnf'))
+        password = list(open(os.path.expanduser('~/.my.cnf')))[2].split()[2]
+        return connector.connect(user='root', password=password)
 
     def dump(self, database, path):
         with open(os.path.join(path, self.dump_name), 'w') as f:
