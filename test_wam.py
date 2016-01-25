@@ -146,7 +146,7 @@ class AppTest(WamTestCase):
     def test_update_databases(self):
         with self.tmp_app({'databases': ['postgresql']}) as app:
             self.assertTrue(app.databases)
-            self.assertEqual(list(app.databases)[0].engine, 'postgresql')
+            self.assertEqual(app.databases['postgresql'].engine, 'postgresql')
 
     def test_update_data_dirs(self):
         meta = {
@@ -172,6 +172,24 @@ class AppTest(WamTestCase):
             self.assertFalse(os.path.exists(os.path.join(app.path, 'a')))
             for data_dir in data_dirs:
                 self.assertEqual(os.stat(os.path.join(app.path, data_dir)).st_uid, 33)
+
+    def test_update_files(self):
+        meta = {
+            'files': {
+                'foo.txt': [
+                    'a = {app.id}',
+                    'b',
+                    'c'
+                ]
+            }
+        }
+        with self.tmp_app(meta) as app:
+            data = open(os.path.join(app.path, 'foo.txt')).read()
+            self.assertEqual(data, 'a = localhoax\nb\nc')
+
+    def test_update_hook(self):
+        with self.tmp_app({'hook': ['touch foo.txt']}) as app:
+            self.assertTrue(os.path.isfile(os.path.join(app.path, 'foo.txt')))
 
     def test_backup(self):
         with self.tmp_app({'databases': ['postgresql'], 'data_dirs': ['a', 'b']}) as app:

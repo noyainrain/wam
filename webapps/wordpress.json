@@ -1,0 +1,27 @@
+{
+    "download": "https://github.com/WordPress/WordPress.git#4.4-branch",
+    "mode": "phpfpm",
+    "stack": ["php5"],
+    "databases": ["mysql"],
+    "data_dirs": ["wp-content/uploads"],
+    "files": {
+        "wp-config.php": [
+            "<?php",
+            "define('DB_NAME', '{app.databases[mysql].name}');",
+            "define('DB_USER', '{app.databases[mysql].user}');",
+            "define('DB_PASSWORD', '{app.databases[mysql].secret}');",
+            "define('DB_HOST', 'localhost');",
+            "define('WP_SITEURL', '{app.url}');",
+            "define('WP_HOME', WP_SITEURL);",
+            "define('DISALLOW_FILE_MODS', true);",
+            "$table_prefix = 'wp_';",
+            "define('ABSPATH', dirname(__FILE__) . '/');",
+            "require_once(ABSPATH . 'wp-settings.php');",
+            "?>"
+        ]
+    },
+    "hook": [
+        "wget -P /tmp https://raw.github.com/wp-cli/builds/gh-pages/phar/wp-cli.phar",
+        "php /tmp/wp-cli.phar core install --url={app.url} --title={app.id} --admin_user={wam.config[user]} --admin_password={wam.config[password]} --admin_email={wam.config[email]} --skip-email"
+    ]
+}

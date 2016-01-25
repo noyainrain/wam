@@ -32,14 +32,36 @@ server {{
     listen {port};
     server_name {host};
 {ssl_config}
+{location_config}
+}}
+{ssl_redirect_config}
+"""
+
+_NGINX_PROXY_TEMPLATE = """\
     location / {{
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_pass http://localhost:{app_port};
+        proxy_pass http://localhost:{app.port};
     }}
-}}
-{ssl_redirect_config}
+"""
+
+_NGINX_PHPFPM_TEMPLATE = """\
+    index index.php;
+
+    location / {{
+        root {app.path.abs};
+    }}
+
+    location ~ \.php(/.*)?$ {{
+        root {app.path.abs};
+        fastcgi_split_path_info ^(.+\.php)(/.*)?$;
+        try_files $fastcgi_script_name =404;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param PATH_INFO $fastcgi_path_info;
+        include fastcgi_params;
+        fastcgi_pass unix:/var/run/php5-fpm.sock;
+    }}
 """
 
 _NGINX_SSL_TEMPLATE = """
@@ -100,9 +122,9 @@ class WebAppManager:
     def __init__(self, config={}, auto_backup=True, **kwargs):
         self.config = {
             'data_path': 'data',
-            # TODO: dont even start with hardcoding again. implement config
-            # parsing
-            'email': 'sven.jms+app.wam@gmail.com', #None
+            'user': None,
+            'password': None,
+            'email': None,
             'port_range': '8000-8079'
         }
         self.config.update(config)
@@ -140,6 +162,7 @@ class WebAppManager:
             return {d for a in self.apps.values() for d in a.databases if d.engine == 'redis'}
         self.database_engines = {
             'postgresql': PostgreSQL(),
+            'mysql': MySQL(),
             'redis': Redis(get_redis_databases)
         }
         # TODO: remove this, just for backwards compatibility
@@ -208,7 +231,7 @@ class WebAppManager:
         port = sorted(free_ports)[0]
 
         secret = randstr()
-        app = App(url, software_id, port, secret, {}, {}, set(), extensions=[], wam=self,
+        app = App(url, software_id, port, secret, {}, {}, databases={}, extensions=[], wam=self,
                   branch=branch)
         self.apps[app.id] = app
         mkdir(app.path)
@@ -302,11 +325,14 @@ class App:
         if not self._software_meta:
             self._software_meta = {
                 'download': None, # TODO: must be set?
+                'mode': 'proxy',
                 'stack': [],
                 'packages': {},
                 'databases': [],
                 'data_dirs': [],
+                'files': {},
                 'jobs': [],
+                'hook': None,
                 'hooks': None,
                 'extension_path': 'ext'
             }
@@ -316,12 +342,19 @@ class App:
             self._software_meta['jobs'] = list(
                 {'cmd': j} if isinstance(j, str) else j for j in
                     self._software_meta.get('jobs', []))
+            # Multiline
+            for key in {'hook'}:
+                if self._software_meta[key]:
+                    self._software_meta[key] = '\n'.join(self._software_meta[key])
         return self._software_meta
     meta=software_meta
 
     @property
     def path(self):
-        return os.path.join(self.wam.config['data_path'], self.sid)
+        class pathstr(str):
+            def __init__(self, value):
+                self.abs = os.path.abspath(value)
+        return pathstr(os.path.join(self.wam.config['data_path'], self.sid))
 
     @property
     def url(self):
@@ -357,7 +390,7 @@ class App:
         return {
             'port': self.port,
             'path': self.path,
-            'databases': list(self.databases)
+            'databases': self.databases
         }
 
     def update(self, fresh=False):
@@ -376,6 +409,8 @@ class App:
         self._update_packages()
         self._update_databases()
         self._update_data_dirs()
+        self._update_files()
+        self._run_hook()
         self._call('update')
 
         self.manager.store()
@@ -424,7 +459,7 @@ class App:
         self._logger.info('Updating stack')
         # js: (nodejs-legacy, npm + npm->bower) here we would have to implement class Npm also
         alias = {
-            'php5': ['php5-fpm'],
+            'php5': ['php5-fpm', 'php5-mysqlnd'],
             'python3': ['python3-pip']
         }
         packages = set(chain.from_iterable(alias[s] for s in self.meta['stack']))
@@ -439,14 +474,14 @@ class App:
 
     def _update_databases(self):
         target_databases = set(self.meta.get('databases', []))
-        current_databases = {d.engine for d in self.databases}
+        current_databases = set(self.databases)
         new = target_databases - current_databases
         old = current_databases - target_databases
         for engine in old:
             # TODO: Delete databases
             pass
         for engine in new:
-            self.database_engines[engine].setup()
+            self.manager.database_engines[engine].setup()
             self.create_database(engine)
 
     def _update_data_dirs(self, cleanup=False):
@@ -475,6 +510,13 @@ class App:
             #from shutil import chown
             #chown(path, self.job_user, self.job_user)
         self.data_dirs = data_dirs
+
+    def _update_files(self):
+        self._logger.info('Updating files')
+        for name, content in self.meta['files'].items():
+            self._logger.info('Writing ' + name)
+            with open(os.path.join(self.path, name), 'w') as f:
+                f.write('\n'.join(content).format(app=self))
 
     def cleanup(self):
         self.stop()
@@ -507,7 +549,7 @@ class App:
         return backup
 
     def _backup_databases(self, backup):
-        for database in self.databases:
+        for database in self.databases.values():
             self._logger.info('Backing up %s database', database.engine)
             self.manager._database_engines[database.engine].dump(database, backup)
 
@@ -523,7 +565,7 @@ class App:
         (``backup_invalid``) is raised.
         """
         # Validate backup
-        for database in self.databases:
+        for database in self.databases.values():
             engine = self.manager._database_engines[database.engine]
             if not os.path.isfile(os.path.join(backup, engine.dump_name)):
                 raise ValueError('backup_invalid')
@@ -545,7 +587,7 @@ class App:
             self.start()
 
     def _restore_databases(self, backup):
-        for database in self.databases:
+        for database in self.databases.values():
             self._logger.info('Restoring %s database', database.engine)
             engine = self.manager._database_engines[database.engine]
             engine.restore(database, os.path.join(backup, engine.dump_name))
@@ -688,6 +730,16 @@ openssl x509 -in $DOMAIN.crt -text
             raise ValueError('extension') # TODO
         self.update()
 
+    def _run_hook(self):
+        if not self.meta['hook']:
+            return
+
+        #['sudo', '-u', self.job_user, 'sh']
+        p = Popen(['sh'], stdin=subprocess.PIPE, cwd=self.path)
+        p.communicate(self.meta['hook'].format(app=self, wam=self.manager).encode('utf-8'))
+        if p.returncode:
+            raise ScriptError()
+
     def _call(self, op):
         if not self.meta['hooks']:
             return
@@ -780,7 +832,7 @@ openssl x509 -in $DOMAIN.crt -text
         self._logger.info('Creating %s database', engine)
         database = self.manager._database_engines[engine].create(
             self.sid, self.dbuser, self.secret)
-        self.databases.add(database)
+        self.databases[database.engine] = database
         self.manager.store()
         return database
 
@@ -789,11 +841,11 @@ openssl x509 -in $DOMAIN.crt -text
         # we only do complete app backups
         #self.backup_database(database)
         self.manager._database_engines[database.engine].delete(database)
-        self.databases.remove(database)
+        del self.databases[database.engine]
         self.manager.store()
 
     def delete_all_databases(self):
-        for database in set(self.databases):
+        for database in list(self.databases.values()):
             self.delete_database(database)
 
     def pull(self):
@@ -864,8 +916,15 @@ class Nginx:
                     app_certificate_key=os.path.abspath(app.certificate_key_path))
                 ssl_redirect_config = _NGINX_SSL_REDIRECT_TEMPLATE.format(host=app.id)
 
+            if app.meta['mode'] == 'proxy':
+                location_config = _NGINX_PROXY_TEMPLATE.format(app=app)
+            elif app.meta['mode'] == 'phpfpm':
+                location_config = _NGINX_PHPFPM_TEMPLATE.format(app=app)
+            else:
+                assert(False)
+
             servers.append(_NGINX_SERVER_TEMPLATE.format(
-                host=app.id, port=port, app_port=app.port, ssl_config=ssl_config,
+                host=app.id, port=port, ssl_config=ssl_config, location_config=location_config,
                 ssl_redirect_config=ssl_redirect_config))
 
         with open(self.config_path, 'w') as f:
@@ -1331,9 +1390,9 @@ if __name__ == '__main__':
     cmd.add_argument('extension_id', help='TODO')
 
     # extensions
-    def protect_app(manager, args):
-        app = manager.apps[args.app_id]
-        ProtectApp(app).protect(args.password)
+    def protect_app(manager, app_id, password):
+        app = manager.apps[app_id]
+        ProtectApp(app).protect(password)
 
     protect_app_cmd = subparsers.add_parser('protect-app')
     protect_app_cmd.set_defaults(run=protect_app)
@@ -1347,7 +1406,12 @@ if __name__ == '__main__':
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level)
 
-    manager = WebAppManager()
+    # TODO: Handle errors
+    from configparser import ConfigParser
+    config = ConfigParser()
+    config.read('.wam.conf')
+
+    manager = WebAppManager(config=dict(config['wam']))
     manager.start()
 
     run = args.pop('run')
