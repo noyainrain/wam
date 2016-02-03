@@ -953,8 +953,8 @@ class Apt(PackageEngine):
 class Pip(PackageEngine):
     def install(self, packages, app_path):
         args = list(packages) if packages else ['-r', os.path.join(app_path, 'requirements.txt')]
-        # TODO: Do not hardcode www-data
-        check_call(['sudo', '-u', 'www-data', 'pip3', 'install', '--user', '-U'] + args)
+        # NOTE: Should we use venv?
+        check_call(['sudo', 'pip3', 'install', '-U'] + args)
 
 class Bundler(PackageEngine):
     def install(self, packages, app_path):
