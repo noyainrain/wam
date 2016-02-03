@@ -9,7 +9,7 @@ from subprocess import CalledProcessError, call, check_call, check_output
 from contextlib import contextmanager
 from shutil import copyfile
 from unittest import TestCase
-from wam import WebAppManager, Apt, Bundler, Bower, PostgreSQL, MySQL, Database, ScriptError
+from wam import WebAppManager, Apt, Pip, Bundler, Bower, PostgreSQL, MySQL, Database, ScriptError
 
 RES_PATH = os.path.join(os.path.dirname(__file__), 'res')
 
@@ -338,6 +338,20 @@ class AptTest(TestCase):
         # most unpopular Python3 Debian package
         # http://popcon.debian.org/stable/main/by_inst
         apt.install({'python3-yapsy'}, app_path)
+
+class PipTest(TestCase):
+    def setUp(self):
+        self.pip = Pip()
+
+    def test_install(self):
+        self.pip.install({'simplejson'}, '/tmp')
+
+    def test_install_auto(self):
+        app_path = mktemp()
+        os.mkdir(app_path)
+        copyfile(os.path.join(RES_PATH, 'requirements.txt'),
+                 os.path.join(app_path, 'requirements.txt'))
+        self.pip.install({}, app_path)
 
 class BundlerTest(TestCase):
     def test_install(self):

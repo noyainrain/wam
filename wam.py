@@ -153,13 +153,14 @@ class WebAppManager:
         self.logger = logging.getLogger('wam')
         self._logger = self.logger
 
-        self.package_engines = {'apt': Apt(), 'bundler': Bundler(), 'bower': Bower()}
+        self.package_engines = {'apt': Apt(), 'pip': Pip(), 'bundler': Bundler(), 'bower': Bower()}
         def get_redis_databases():
             #for app in self.apps:
             #    for database in app.databases:
             #        if database.engine == 'redis':
             #            return database
-            return {d for a in self.apps.values() for d in a.databases if d.engine == 'redis'}
+            #return {d for a in self.apps.values() for d in a.databases.values() if d.engine == 'redis'}
+            return {a.databases['redis'] for a in self.apps.values() if 'redis' in a.databases}
         self.database_engines = {
             'postgresql': PostgreSQL(),
             'mysql': MySQL(),
@@ -949,6 +950,12 @@ class Apt(PackageEngine):
             return
         check_call(['sudo', 'apt-get', '-qy', 'install'] + list(packages))
 
+class Pip(PackageEngine):
+    def install(self, packages, app_path):
+        args = list(packages) if packages else ['-r', os.path.join(app_path, 'requirements.txt')]
+        # TODO: Do not hardcode www-data
+        check_call(['sudo', '-u', 'www-data', 'pip3', 'install', '--user', '-U'] + args)
+
 class Bundler(PackageEngine):
     def install(self, packages, app_path):
         if packages:
@@ -1275,6 +1282,9 @@ if __name__ == '__main__':
         app = manager.apps[app_id]
         manager.remove(app)
 
+    def list_cmd(manager):
+        print('\n'.join('* ' + a.id for a in sorted(manager.apps.values(), key=lambda a: a.id)))
+
     def app_update_cmd(manager, app_id):
         app = manager.apps[app_id]
         app.update()
@@ -1328,6 +1338,11 @@ if __name__ == '__main__':
         description="""Remove the app.""")
     cmd.set_defaults(run=app_remove_cmd)
     cmd.add_argument('app_id', help='App ID.')
+
+    cmd = subparsers.add_parser(
+        'list',
+        description="""List all apps.""")
+    cmd.set_defaults(run=list_cmd)
 
     cmd = subparsers.add_parser(
         'app-update',
