@@ -10,6 +10,7 @@ import subprocess
 import logging
 import shlex
 import argparse
+import shutil
 from time import sleep
 from itertools import chain
 from collections.abc import Mapping
@@ -17,7 +18,7 @@ from subprocess import Popen, CalledProcessError, check_call, check_output
 from shutil import copyfile, copytree, make_archive
 from random import choice
 from string import ascii_lowercase
-from urllib.parse import urldefrag
+from urllib.parse import urlparse, urldefrag
 from re import sub
 from os import path, mkdir
 from errno import ENOENT
@@ -26,6 +27,12 @@ from datetime import datetime
 # TODO: Implement config parsing
 
 _NGINX_CONFIG_PATH = '/etc/nginx/conf.d/wam.conf'
+
+_NGINX_TEMPLATE = """\
+client_max_body_size 512m;
+
+{config}
+"""
 
 _NGINX_SERVER_TEMPLATE = """\
 server {{
@@ -46,19 +53,39 @@ _NGINX_PROXY_TEMPLATE = """\
     }}
 """
 
+# TODO: remove location / from below
+# TODO: merge proxy from above with this??
+# exclude for owncloud: ^/data
+_NGINX_STATIC_TEMPLATE = """\
+    location {url} {{
+        root {path};
+
+        location ~ {exclude} {{
+            return 404;
+        }}
+    }}
+"""
+
 _NGINX_PHPFPM_TEMPLATE = """\
     index index.php;
 
     location / {{
         root {app.path.abs};
+
+        # TODO: Do not hardcode
+        location ~ ^/data {{
+            return 404;
+        }}
     }}
 
-    location ~ \.php(/.*)?$ {{
+    location ~ \.php(/|$) {{
         root {app.path.abs};
-        fastcgi_split_path_info ^(.+\.php)(/.*)?$;
+        fastcgi_split_path_info ^(.+?\.php)(/.*)?$;
         try_files $fastcgi_script_name =404;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        fastcgi_param PATH_INFO $fastcgi_path_info;
+        # http://trac.nginx.org/nginx/ticket/321
+        set $path_info $fastcgi_path_info;
+        fastcgi_param PATH_INFO $path_info;
         include fastcgi_params;
         fastcgi_pass unix:/var/run/php5-fpm.sock;
     }}
@@ -77,6 +104,8 @@ server {{
 }}
 """
 
+import yaml
+
 class Registry(Mapping):
     def __init__(self):
         self._cache = {}
@@ -84,7 +113,7 @@ class Registry(Mapping):
     def __getitem__(self, key):
         if key not in self._cache:
             with open(key) as f:
-                meta = json.load(f)
+                meta = yaml.safe_load(f)
                 self._cache[key] = meta
         return self._cache[key]
 
@@ -213,7 +242,7 @@ class WebAppManager:
             if type == 'set':
                 return set(json['items'])
             else:
-                types = {'App': App, 'Database': Database, 'Job': Job}
+                types = {'App': App, 'Database': Database, 'Extension': Extension, 'Job': Job}
                 return types[type](wam=self, **json)
         else:
             return json
@@ -232,7 +261,7 @@ class WebAppManager:
         port = sorted(free_ports)[0]
 
         secret = randstr()
-        app = App(url, software_id, port, secret, {}, {}, databases={}, extensions=[], wam=self,
+        app = App(url, software_id, port, secret, {}, {}, databases={}, extensions={}, wam=self,
                   branch=branch)
         self.apps[app.id] = app
         mkdir(app.path)
@@ -262,6 +291,15 @@ class WebAppManager:
         del self.apps[app.id]
         self.nginx.configure()
         self.store()
+
+    # TODO: Rename
+    def startx(self):
+        for app in self.apps.values():
+            app.start()
+
+    def stop(self):
+        for app in self.apps.values():
+            app.stop()
 
     def json(self):
         #return {'apps': {i: a.json() for i, a in self.apps.items()}}
@@ -294,6 +332,10 @@ class App:
     .. attribute:: port
 
        Port the web server uses to communicate with the application server.
+
+    .. attribute:: extensions
+
+       Map of installed extensions.
     """
 
     def __init__(self, id, software_id, port, secret, jobs, installed_packages, databases,
@@ -335,18 +377,16 @@ class App:
                 'jobs': [],
                 'hook': None,
                 'hooks': None,
-                'extension_path': 'ext'
+                'extension_path': 'ext',
+                'default_extensions': []
             }
-            with open(self.software_id) as f:
-                meta = json.load(f)
-                self._software_meta.update(meta)
+            meta = self.manager.meta[self.software_id]
+            self._software_meta.update(meta)
+            if isinstance(self._software_meta['stack'], str):
+                self._software_meta['stack'] = [self._software_meta['stack']]
             self._software_meta['jobs'] = list(
                 {'cmd': j} if isinstance(j, str) else j for j in
                     self._software_meta.get('jobs', []))
-            # Multiline
-            for key in {'hook'}:
-                if self._software_meta[key]:
-                    self._software_meta[key] = '\n'.join(self._software_meta[key])
         return self._software_meta
     meta=software_meta
 
@@ -369,7 +409,7 @@ class App:
 
     @property
     def is_running(self):
-        return bool(self.pids)
+        return bool(self.meta['mode'] == 'phpfpm' or self.pids)
 
     # FIXME: use app.sid for cert paths
     @property
@@ -405,6 +445,7 @@ class App:
             if self.manager.auto_backup:
                 self.backup()
 
+        self._update_default_extensions()
         self._update_code()
         self._update_stack()
         self._update_packages()
@@ -418,6 +459,12 @@ class App:
         if fresh or running:
             self.start()
 
+    def _update_default_extensions(self):
+        new = set(self.meta['default_extensions']) - {e.url for e in self.extensions.values()}
+        for url in new:
+            ext = Extension(url)
+            self.extensions[ext.id] = ext
+
     def _update_code(self):
         self._logger.info('Updating code')
 
@@ -426,15 +473,16 @@ class App:
             return
 
         self._update_repo(self.path, url, branch=self.branch)
-        for extension in self.extensions:
+        for extension in self.extensions.values():
             # TODO: remove extension again if needed
-            path = os.path.join(self.path, self.meta['extension_path'], extension.replace('/', '-'))
-            self._update_repo(path, self.manager.meta[extension]['download'])
+            path = os.path.join(self.path, self.meta['extension_path'], extension.id)
+            self._update_repo(path, extension.url)
 
     def _update_repo(self, repo, url, branch=None):
         try:
-            git_root = (check_output(['git', '-C', repo, 'rev-parse', '--show-toplevel'])
-                        .decode().strip())
+            git_root = check_output(['git', '-C', repo, 'rev-parse', '--show-toplevel'],
+                                    stderr=subprocess.DEVNULL)
+            git_root = git_root.decode().strip()
         except CalledProcessError:
             git_root = None
         # git_root is always absolute, repo may or may not be
@@ -444,16 +492,18 @@ class App:
             url, default_branch = urldefrag(url)
             branch = branch or default_branch
             self._logger.info('Cloning from %s%s', url, '#' + branch if branch else '')
-            cmd = ['git', 'clone', '-q', '--single-branch', url, repo]
+            cmd = ['git', 'clone', '-q', '--recursive', '--single-branch', url, repo]
             if branch:
-                cmd[4:4] = ['-b', branch]
+                cmd[5:5] = ['-b', branch]
             check_call(cmd)
         else:
             self._logger.info('Pulling from %s', url)
             # Discard all local changes to prevent merge problems
-            check_call(['git', '-C', repo, 'reset', '--hard'])
+            # TODO
+            #check_call(['git', '-C', repo, 'reset', '--hard'])
             check_call(['git', '-C', repo, 'fetch'])
             check_call(['git', '-C', repo, 'merge'])
+            check_call(['git', '-C', repo, 'submodule', 'update', '--recursive'])
 
     def _update_stack(self):
         # Stack = runtime + package manager
@@ -517,7 +567,7 @@ class App:
         for name, content in self.meta['files'].items():
             self._logger.info('Writing ' + name)
             with open(os.path.join(self.path, name), 'w') as f:
-                f.write('\n'.join(content).format(app=self))
+                f.write(content.format(app=self, wam=self.manager))
 
     def cleanup(self):
         self.stop()
@@ -557,7 +607,10 @@ class App:
     def _backup_data_dirs(self, backup):
         for data_dir in self.data_dirs:
             self._logger.info('Backing up data directory %s', data_dir)
-            copytree(os.path.join(self.path, data_dir), os.path.join(backup, data_dir))
+            # TODO comment about why some apps are stupid and with chmod
+            d = os.path.join(self.path, data_dir)
+            check_call(['sudo', 'chmod', '-R', 'a+rX', d])
+            copytree(d, os.path.join(backup, data_dir))
 
     def restore(self, backup):
         """See :ref:`wam app-restore`.
@@ -620,6 +673,7 @@ class App:
             # this is a restart, good idea here?
             self.stop()
 
+        # TODO: set cwd to app.path for all jobs
         self._logger.info('Starting %s', self.id)
         for job in self.meta['jobs']:
             cmd = job['cmd'].format(**self.data)
@@ -716,19 +770,16 @@ openssl x509 -in $DOMAIN.crt -text
         call('openssl x509 -in {} -text'.format(self.certificate_path))
         self.manager.nginx.configure()
 
-    def add_extension(self, extension):
-        if extension in self.extensions:
+    def add_extension(self, url):
+        if url in (e.url for e in self.extensions.values()):
             raise ValueError('extension') #TODO
-        if not os.path.isfile(extension):
-            raise ValueError('extension_not_found') #TODO
-        self.extensions.append(extension)
+        ext = Extension(url)
+        self.extensions[ext.id] = ext
         self.update()
+        return ext
 
-    def remove_extension(self, extension):
-        try:
-            self.extensions.remove(extension)
-        except ValueError:
-            raise ValueError('extension') # TODO
+    def remove_extension(self, ext):
+        del self.extensions[ext.id]
         self.update()
 
     def _run_hook(self):
@@ -736,7 +787,7 @@ openssl x509 -in $DOMAIN.crt -text
             return
 
         #['sudo', '-u', self.job_user, 'sh']
-        p = Popen(['sh'], stdin=subprocess.PIPE, cwd=self.path)
+        p = Popen(['sh', '-e'], stdin=subprocess.PIPE, cwd=self.path)
         p.communicate(self.meta['hook'].format(app=self, wam=self.manager).encode('utf-8'))
         if p.returncode:
             raise ScriptError()
@@ -929,7 +980,7 @@ class Nginx:
                 ssl_redirect_config=ssl_redirect_config))
 
         with open(self.config_path, 'w') as f:
-            f.write('\n'.join(servers))
+            f.write(_NGINX_TEMPLATE.format(config='\n'.join(servers)))
 
         check_call(['sudo', 'systemctl', 'reload', 'nginx'])
 
@@ -1156,6 +1207,17 @@ class Database:
     def json(self):
         return vars(self)
 
+class Extension:
+    def __init__(self, url, wam=None):
+        self.url = url
+
+    @property
+    def id(self):
+        return os.path.splitext(os.path.basename(os.path.abspath(urlparse(self.url).path)))[0]
+
+    def json(self):
+        return vars(self)
+
 CRON_CONFIG_PATH = '/etc/cron.d/wam'
 
 class Cron:
@@ -1283,7 +1345,14 @@ if __name__ == '__main__':
         manager.remove(app)
 
     def list_cmd(manager):
-        print('\n'.join('* ' + a.id for a in sorted(manager.apps.values(), key=lambda a: a.id)))
+        for app in sorted(manager.apps.values(), key=lambda a: a.id):
+            print('* {} [{}]'.format(app.id, 'running' if app.is_running else 'stopped'))
+
+    def start_cmd(manager):
+        manager.startx()
+
+    def stop_cmd(manager):
+        manager.stop()
 
     def app_update_cmd(manager, app_id):
         app = manager.apps[app_id]
@@ -1343,6 +1412,16 @@ if __name__ == '__main__':
         'list',
         description="""List all apps.""")
     cmd.set_defaults(run=list_cmd)
+
+    cmd = subparsers.add_parser(
+        'start',
+        description="""Start all apps.""")
+    cmd.set_defaults(run=start_cmd)
+
+    cmd = subparsers.add_parser(
+        'stop',
+        description="""Stop all apps.""")
+    cmd.set_defaults(run=stop_cmd)
 
     cmd = subparsers.add_parser(
         'app-update',

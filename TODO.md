@@ -3,17 +3,19 @@ wam! ToDos
 
 ## Issues
 
+* Strict-Transport-Security
+
+* integration tests for all webapps, install + uninstall
+
+* start/stop befehle, stoppstartet alle apps
+
+  Including service file, die wam start aufruft
+
 * Refactor encrypt/2
 
   Rename encrypt() and encrypt2() to something like prepare\_encrypt() and encrypt(). encrypt()
   should then optionally accept a *privatekey*, so externally created/managed certificates can
   easily be used.
-
-* Reenable password protection (with nginx)
-
-* meetling.json uses incorrect Redis database
-
-  Instead call `python3 -m meetling --redis-url={databases.redis.name}`.
 
 * Build auto-update feature into wam!
 
@@ -25,4 +27,5 @@ wam! ToDos
 
 ## Development Discussion
 
-* ...
+* watch: data dirs owner conflicts with update (git reset does not have priviliges to change
+  those directories)

@@ -129,6 +129,10 @@ class AppTest(WamTestCase):
     #    self.app.install('apt', {'python3-yapsy'})
     #    self.assertIn('python3-yapsy', self.app.installed_packages['apt'])
 
+    def test_update_default_extensions(self):
+        with self.tmp_app({'default_extensions': ['.']}) as app:
+            self.assertIn('wam', app.extensions)
+
     def test_update_stack(self):
         with self.tmp_app({'stack': ['python3']}) as app:
             self.assertEqual(call(['which', 'pip3']), 0)
@@ -160,10 +164,10 @@ class AppTest(WamTestCase):
 
     def test_update_data_dirs_changed(self):
         with self.tmp_app({'data_dirs': ['a', 'b']}) as app:
-
-            # XXX what an ugly hack... please add a cool way to update software meta file
             with open(app.software_id, 'w') as f:
                 f.write('{"data_dirs": ["b", "c"]}')
+            # XXX what an ugly hack... please add a cool way to update software meta file
+            del self.manager.meta._cache[app.software_id]
             app._software_meta = None
 
             data_dirs = {'b', 'c'}
@@ -176,11 +180,7 @@ class AppTest(WamTestCase):
     def test_update_files(self):
         meta = {
             'files': {
-                'foo.txt': [
-                    'a = {app.id}',
-                    'b',
-                    'c'
-                ]
+                'foo.txt': 'a = {app.id}\nb\nc'
             }
         }
         with self.tmp_app(meta) as app:
@@ -188,7 +188,7 @@ class AppTest(WamTestCase):
             self.assertEqual(data, 'a = localhoax\nb\nc')
 
     def test_update_hook(self):
-        with self.tmp_app({'hook': ['touch foo.txt']}) as app:
+        with self.tmp_app({'hook': 'touch foo.txt'}) as app:
             self.assertTrue(os.path.isfile(os.path.join(app.path, 'foo.txt')))
 
     def test_backup(self):
@@ -218,18 +218,17 @@ class AppTest(WamTestCase):
         self.assertTrue(self.app.encrypted)
 
     def test_add_extension(self):
-        with self.tmp_app({'download': '.'}) as app, tmp_software({'download': '.'}) as extension:
-            app.add_extension(extension)
-            self.assertIn(extension, app.extensions)
+        with self.tmp_app({'download': '.'}) as app:
+            ext = app.add_extension('.')
+            self.assertIn(ext.id, app.extensions)
             # TODO: better test this part in update code with extension test????
-            path = os.path.join(app.path, 'ext', extension.replace('/', '-'), 'wam.py')
-            self.assertTrue(os.path.isfile(path))
+            self.assertTrue(os.path.isfile(os.path.join(app.path, 'ext', ext.id, 'wam.py')))
 
     def test_remove_extension(self):
-        with self.tmp_app({'download': '.'}) as app, tmp_software({'download': '.'}) as extension:
-            app.add_extension(extension)
-            app.remove_extension(extension)
-            self.assertNotIn(extension, app.extensions)
+        with self.tmp_app({'download': '.'}) as app:
+            ext = app.add_extension('.')
+            app.remove_extension(ext)
+            self.assertNotIn(ext.id, app.extensions)
             # TODO: remove extdir again?
 
     def _copy_to_data_dir(self, app, file, data_dir):
@@ -262,12 +261,12 @@ class AppUpdateCodeTest(WamTestCase):
             self.commit('# foo')
             app.update()
 
-    def test_update_code_local_changes(self):
-        with self.tmp_app({'download': self.remote}) as app:
-            self.commit('# foo')
-            with open(os.path.join(app.path, 'wam.py'), 'a') as f:
-                f.write('# bar\n')
-            app.update()
+    #def test_update_code_local_changes(self):
+    #    with self.tmp_app({'download': self.remote}) as app:
+    #        self.commit('# foo')
+    #        with open(os.path.join(app.path, 'wam.py'), 'a') as f:
+    #            f.write('# bar\n')
+    #        app.update()
 
 @contextmanager
 def tmp_software(meta):

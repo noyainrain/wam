@@ -1,0 +1,38 @@
+download: https://github.com/owncloud/core.git#stable8.2
+mode: phpfpm
+stack: php5
+packages:
+    apt:
+        - php5-curl
+        - php5-gd
+        - php5-sqlite
+data_dirs:
+    - config
+    - data
+static:
+    /:
+        path: .
+        exclude: ^/data
+hook: |
+    if [ ! -f config/config.php ]; then
+        # Disable appstore so installation works with unwritable apps directory
+        sudo -u www-data sh -c "echo \"<?php \\\$CONFIG = array('appstoreenabled' => false); ?>\" > config/config.php"
+        sudo -u www-data php occ maintenance:install --admin-user={wam.config[user]} --admin-pass={wam.config[password]}
+        # Installation always sets trusted_domains to localhost
+        sudo -u www-data sed -i "s/'localhost'/'{app.id}'/" config/config.php
+    else
+        sudo -u www-data php occ upgrade || true
+    fi
+extension_path: apps
+default_extensions:
+    # core
+    - https://github.com/owncloud/activity.git#stable8.2
+    - https://github.com/owncloud/files_texteditor.git#stable8.2
+    - https://github.com/owncloud/files_pdfviewer.git#stable8.2
+    - https://github.com/owncloud/firstrunwizard.git#stable8.2
+    - https://github.com/owncloud/gallery.git#stable8.2
+    - https://github.com/owncloud/notifications.git#stable8.2
+    - https://github.com/owncloud/templateeditor.git#stable8.2
+    # caldav + webdav
+    - https://github.com/owncloud/calendar.git#stable8.2
+    - https://github.com/owncloud/contacts.git#stable8.2
