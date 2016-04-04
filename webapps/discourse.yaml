@@ -1,4 +1,5 @@
 download: https://github.com/discourse/discourse.git#beta
+stack: ruby
 packages:
     apt:
         - postgresql-contrib

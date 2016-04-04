@@ -511,7 +511,8 @@ class App:
         # js: (nodejs-legacy, npm + npm->bower) here we would have to implement class Npm also
         alias = {
             'php5': ['php5-fpm', 'php5-mysqlnd'],
-            'python3': ['python3-pip']
+            'python3': ['python3-pip'],
+            'ruby': ['bundler']
         }
         packages = set(chain.from_iterable(alias[s] for s in self.meta['stack']))
         self.install('apt', packages)
