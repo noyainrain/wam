@@ -1195,6 +1195,8 @@ class Redis(DatabaseEngine):
         from redis import StrictRedis
         r = StrictRedis()
         r.save()
+        # XXX: compatibility with non systemd, remove again
+        check_call(['sudo', 'chmod', 'o+r', '/var/lib/redis/dump.rdb'])
         copyfile('/var/lib/redis/dump.rdb', os.path.join(path, self.dump_name))
 
     def restore(self, database, dump_path):
