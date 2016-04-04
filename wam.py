@@ -982,7 +982,9 @@ class Nginx:
         with open(self.config_path, 'w') as f:
             f.write(_NGINX_TEMPLATE.format(config='\n'.join(servers)))
 
-        check_call(['sudo', 'systemctl', 'reload', 'nginx'])
+        # XXX: compatibility with non systemd, remove again
+        check_call(['sudo', 'service', 'nginx', 'reload'])
+        #check_call(['sudo', 'systemctl', 'reload', 'nginx'])
 
 class PackageEngine:
     # TODO: maybe packages should either be packages or a path to the app.....
