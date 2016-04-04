@@ -1100,8 +1100,12 @@ class PostgreSQL(SQLDatabaseEngine):
     grant_query = "GRANT ALL ON DATABASE {name} TO {user}"
 
     def setup(self):
-        # apt:postgresql, pip:psycopg2
-        pass
+        try:
+            import psycopg2
+        except ImportError:
+            Apt().install({'postgresql', 'python3-psycopg2'}, None)
+            subprocess.call(['sudo', '-u', 'postgres', 'psql', '-c',
+                             'CREATE USER {} WITH SUPERUSER'.format(os.environ['USER'])])
 
     def connect(self):
         import psycopg2
@@ -1169,8 +1173,10 @@ class Redis(DatabaseEngine):
         self.get_redis_databases = get_redis_databases
 
     def setup(self):
-        # apt:redis-server, pip:redis
-        pass
+        try:
+            import redis
+        except ImportError:
+            Apt().install({'redis-server', 'python3-redis'}, None)
 
     def create(self, name, user, secret):
         taken = {int(d.name) for d in self.get_redis_databases()}
