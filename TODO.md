@@ -3,6 +3,17 @@ wam! ToDos
 
 ## Issues
 
+* Implement update of repository URLs
+
+  Change of repo URLs happens only rarely, but when it does, the app is unusable. Also make possible
+  for extensions.
+
+* Owncloud: Update disables extensions, but does not reenable again
+
+* Handle IO errors
+
+  E.g. if git fails due to network down / repo deleted etc. print a nice error message
+
 * Strict-Transport-Security
 
 * integration tests for all webapps, install + uninstall

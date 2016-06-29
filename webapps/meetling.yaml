@@ -1,0 +1,11 @@
+download: https://github.com/NoyaInRain/meetling.git
+stack: python3
+packages:
+    pip: []
+    bower: []
+databases:
+    - redis
+jobs:
+    -
+        cmd: python3 -m meetling --redis-url={databases[redis].name} --port {port}
+        cwd: "{path}"

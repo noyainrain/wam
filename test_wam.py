@@ -173,7 +173,7 @@ class AppTest(WamTestCase):
             data_dirs = {'b', 'c'}
             app.update()
             self.assertEqual(app.data_dirs, data_dirs)
-            self.assertFalse(os.path.exists(os.path.join(app.path, 'a')))
+            self.assertEqual(os.stat(os.path.join(app.path, 'a')).st_uid, os.getuid())
             for data_dir in data_dirs:
                 self.assertEqual(os.stat(os.path.join(app.path, data_dir)).st_uid, 33)
 
@@ -221,15 +221,14 @@ class AppTest(WamTestCase):
         with self.tmp_app({'download': '.'}) as app:
             ext = app.add_extension('.')
             self.assertIn(ext.id, app.extensions)
-            # TODO: better test this part in update code with extension test????
-            self.assertTrue(os.path.isfile(os.path.join(app.path, 'ext', ext.id, 'wam.py')))
+            self.assertTrue(os.path.isfile(os.path.join(ext.path, 'wam.py')))
 
     def test_remove_extension(self):
         with self.tmp_app({'download': '.'}) as app:
             ext = app.add_extension('.')
             app.remove_extension(ext)
             self.assertNotIn(ext.id, app.extensions)
-            # TODO: remove extdir again?
+            self.assertFalse(os.path.exists(ext.path))
 
     def _copy_to_data_dir(self, app, file, data_dir):
         check_call(['sudo', '-u', app.job_user, 'cp', os.path.join(RES_PATH, file),
@@ -242,8 +241,8 @@ class AppUpdateCodeTest(WamTestCase):
         check_output(['git', 'clone', '-q', '.', self.remote])
         check_output(['git', '-C', self.remote, 'branch', 'test'])
 
-    def commit(self, text):
-        with open(os.path.join(self.remote, 'wam.py'), 'a') as f:
+    def commit(self, path, text):
+        with open(os.path.join(self.remote, path), 'a') as f:
             f.write(text + '\n')
         check_output(['git', '-C', self.remote, 'commit', '-am', 'Add stuff'])
 
@@ -258,7 +257,12 @@ class AppUpdateCodeTest(WamTestCase):
 
     def test_update_code_remote_changes(self):
         with self.tmp_app({'download': self.remote}) as app:
-            self.commit('# foo')
+            self.commit('wam.py', '# foo')
+            app.update()
+
+    def test_update_code_remote_data_dir_changes(self):
+        with self.tmp_app({'download': self.remote, 'data_dirs': ['webapps']}) as app:
+            self.commit('webapps/discourse.yaml', '# foo')
             app.update()
 
     #def test_update_code_local_changes(self):

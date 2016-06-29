@@ -34,5 +34,5 @@ default_extensions:
     - https://github.com/owncloud/notifications.git#stable8.2
     - https://github.com/owncloud/templateeditor.git#stable8.2
     # caldav + webdav
-    - https://github.com/owncloud/calendar.git#stable8.2
-    - https://github.com/owncloud/contacts.git#stable8.2
+    - https://github.com/owncloudarchive/calendar.git#stable8.2
+    - https://github.com/owncloudarchive/contacts.git#stable8.2

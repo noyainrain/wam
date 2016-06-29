@@ -1,0 +1,25 @@
+download: https://github.com/piwik/piwik.git#2.16.1
+mode: phpfpm
+stack: php5
+databases:
+    - mysql
+data_dirs:
+    - config
+    - misc/user
+    - tmp
+hook: |
+    if [ ! -f config/config.ini.php ]; then
+        wget https://getcomposer.org/composer.phar
+        php composer.phar install --no-dev
+        echo always_populate_raw_post_data=-1 > .user.ini
+        echo "Open {app.url} and enter the following information:"
+        echo "* Database Setup > Login: {app.databases[mysql].user}"
+        echo "* Database Setup > Password: {app.databases[mysql].secret}"
+        echo "* Database Setup > Database Name: {app.databases[mysql].name}"
+        echo "* Super User > Super user login: {wam.config[user]}"
+        echo "* Super User > Password: ***"
+        echo "* Super User > Password (repeat): ***"
+        echo "* Super User > Email: {wam.config[email]}"
+    else
+        sudo -u www-data php console core:update
+    fi

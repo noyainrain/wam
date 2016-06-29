@@ -1,9 +1,6 @@
 download: https://github.com/WordPress/WordPress.git#4.4-branch
 mode: phpfpm
 stack: php5
-packages:
-    apt:
-        - php5-gd
 databases:
     - mysql
 data_dirs:

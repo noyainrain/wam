@@ -287,10 +287,14 @@ class WebAppManager:
             app.cleanup()
         except ScriptError:
             self.logger.error('app cleanup failed, continuing removal')
-        os.rename(app.path, '/tmp/wam.backup.{}'.format(randstr()))
+        trash(app.path)
         del self.apps[app.id]
         self.nginx.configure()
         self.store()
+
+    def update(self):
+        for app in self.apps.values():
+            app.update()
 
     # TODO: Rename
     def startx(self):
@@ -445,6 +449,8 @@ class App:
             if self.manager.auto_backup:
                 self.backup()
 
+        self._reset_data_dirs()
+
         self._update_default_extensions()
         self._update_code()
         self._update_stack()
@@ -452,6 +458,9 @@ class App:
         self._update_databases()
         self._update_data_dirs()
         self._update_files()
+
+        self._set_data_dirs()
+
         self._run_hook()
         self._call('update')
 
@@ -462,7 +471,7 @@ class App:
     def _update_default_extensions(self):
         new = set(self.meta['default_extensions']) - {e.url for e in self.extensions.values()}
         for url in new:
-            ext = Extension(url)
+            ext = Extension(url, self.id, self.wam)
             self.extensions[ext.id] = ext
 
     def _update_code(self):
@@ -474,9 +483,8 @@ class App:
 
         self._update_repo(self.path, url, branch=self.branch)
         for extension in self.extensions.values():
-            # TODO: remove extension again if needed
-            path = os.path.join(self.path, self.meta['extension_path'], extension.id)
-            self._update_repo(path, extension.url)
+            #path = os.path.join(self.path, self.meta['extension_path'], extension.id)
+            self._update_repo(extension.path, extension.url)
 
     def _update_repo(self, repo, url, branch=None):
         try:
@@ -501,7 +509,10 @@ class App:
             # Discard all local changes to prevent merge problems
             # TODO
             #check_call(['git', '-C', repo, 'reset', '--hard'])
-            check_call(['git', '-C', repo, 'fetch'])
+            try:
+                check_call(['git', '-C', repo, 'fetch'])
+            except CalledProcessError:
+                raise IOError('git')
             check_call(['git', '-C', repo, 'merge'])
             check_call(['git', '-C', repo, 'submodule', 'update', '--recursive'])
 
@@ -510,7 +521,7 @@ class App:
         self._logger.info('Updating stack')
         # js: (nodejs-legacy, npm + npm->bower) here we would have to implement class Npm also
         alias = {
-            'php5': ['php5-fpm', 'php5-mysqlnd'],
+            'php5': ['php5-fpm', 'php5-mysqlnd', 'php5-gd'],
             'python3': ['python3-pip'],
             'ruby': ['bundler']
         }
@@ -536,19 +547,36 @@ class App:
             self.manager.database_engines[engine].setup()
             self.create_database(engine)
 
-    def _update_data_dirs(self, cleanup=False):
-        data_dirs = set(self.software_meta.get('data_dirs', []) if not cleanup else [])
-        new = data_dirs - self.data_dirs
-        old = self.data_dirs - data_dirs
-        for data_dir in old:
-            self._logger.info('Deleting data directory %s', data_dir)
+    def _set_data_dirs(self):
+        if self.data_dirs:
+            check_call(['sudo', 'chown', '-R', '{}:{}'.format(self.job_user, self.job_user)] +
+                       [os.path.join(self.path, d) for d in self.data_dirs])
+
+    def _reset_data_dirs(self):
+        #for data_dir in self.data_dirs:
+            #self._logger.info('Deleting data directory %s', data_dir)
             #chown(os.path.join(self.path, path), os.geteuid(), os.getegid())
             # It is safer to remove the tree directly as the job user, which is less privileged
             #check_call(['sudo', '-u', self.job_user, 'rm', '-r', os.path.join(self.path, path)])
+            #os.rename(path, '/tmp/wam-{}'.format(randstr()))
+            #check_call(['sudo', 'chown', '-R', '{}:{}'.format(os.geteuid(), os.getegid()), path])
+            #path = os.path.join(self.path, data_dir)
+        if self.data_dirs:
+            check_call(['sudo', 'chown', '-R', '{}:{}'.format(os.geteuid(), os.getegid())] +
+                       [os.path.join(self.path, d) for d in self.data_dirs])
 
-            path = os.path.join(self.path, data_dir)
-            check_call(['sudo', 'chown', '-R', '{}:{}'.format(os.geteuid(), os.getegid()), path])
-            os.rename(path, '/tmp/wam-{}'.format(randstr()))
+    def _update_data_dirs(self, cleanup=False):
+        data_dirs = set(self.software_meta.get('data_dirs', []) if not cleanup else [])
+        #old = self.data_dirs - data_dirs
+        #for data_dir in old:
+        #    self._logger.info('Deleting data directory %s', data_dir)
+        #    #chown(os.path.join(self.path, path), os.geteuid(), os.getegid())
+        #    # It is safer to remove the tree directly as the job user, which is less privileged
+        #    #check_call(['sudo', '-u', self.job_user, 'rm', '-r', os.path.join(self.path, path)])
+        #    path = os.path.join(self.path, data_dir)
+        #    check_call(['sudo', 'chown', '-R', '{}:{}'.format(os.geteuid(), os.getegid()), path])
+        #    os.rename(path, '/tmp/wam-{}'.format(randstr()))
+        new = data_dirs - self.data_dirs
         for path in new:
             self._logger.info('Creating data directory %s', path)
             path = os.path.join(self.path, path)
@@ -557,10 +585,6 @@ class App:
             except FileExistsError:
                 # That's okay
                 pass
-            check_call(['sudo', 'chown', '-R',
-                        '{}:{}'.format(self.job_user, self.job_user), path])
-            #from shutil import chown
-            #chown(path, self.job_user, self.job_user)
         self.data_dirs = data_dirs
 
     def _update_files(self):
@@ -648,11 +672,13 @@ class App:
             engine.restore(database, os.path.join(backup, engine.dump_name))
 
     def _restore_data_dirs(self, backup):
-        self._update_data_dirs(cleanup=True)
+        self._reset_data_dirs()
         for data_dir in self.meta.get('data_dirs', []):
             self._logger.info('Restoring data directory %s', data_dir)
-            copytree(os.path.join(backup, data_dir), os.path.join(self.path, data_dir))
-        self._update_data_dirs()
+            path = os.path.join(self.path, data_dir)
+            trash(path)
+            copytree(os.path.join(backup, data_dir), path)
+        self._set_data_dirs()
 #        for data_dir in self.data_dirs:
 #            root = os.path.join(backup, data_dir)
 #            for path, dirs, files in os.walk(root):
@@ -774,14 +800,16 @@ openssl x509 -in $DOMAIN.crt -text
     def add_extension(self, url):
         if url in (e.url for e in self.extensions.values()):
             raise ValueError('extension') #TODO
-        ext = Extension(url)
+        ext = Extension(url, self.id, self.wam)
         self.extensions[ext.id] = ext
-        self.update()
+        self._update_repo(ext.path, ext.url)
+        self.manager.store()
         return ext
 
     def remove_extension(self, ext):
+        trash(ext.path)
         del self.extensions[ext.id]
-        self.update()
+        self.manager.store()
 
     def _run_hook(self):
         if not self.meta['hook']:
@@ -1219,15 +1247,28 @@ class Database:
         return vars(self)
 
 class Extension:
-    def __init__(self, url, wam=None):
+    def __init__(self, url, app, wam):
+        self._app_id = app
         self.url = url
+        self.wam = wam
 
     @property
     def id(self):
         return os.path.splitext(os.path.basename(os.path.abspath(urlparse(self.url).path)))[0]
 
+    @property
+    def app(self):
+        return self.wam.apps[self._app_id]
+
+    @property
+    def path(self):
+        return os.path.join(self.app.path, self.app.meta['extension_path'], self.id)
+
     def json(self):
-        return vars(self)
+        return {
+            'url': self.url,
+            'app': self._app_id
+        }
 
 CRON_CONFIG_PATH = '/etc/cron.d/wam'
 
@@ -1331,6 +1372,9 @@ def call(cmd):
 def randstr(length=16, charset=ascii_lowercase):
     return ''.join(choice(charset) for i in range(length))
 
+def trash(path):
+    os.rename(path, '/tmp/{}.{}'.format(os.path.basename(path), randstr()))
+
 # main
 
 if __name__ == '__main__':
@@ -1358,6 +1402,9 @@ if __name__ == '__main__':
     def list_cmd(manager):
         for app in sorted(manager.apps.values(), key=lambda a: a.id):
             print('* {} [{}]'.format(app.id, 'running' if app.is_running else 'stopped'))
+
+    def update_cmd(manager):
+        manager.update()
 
     def start_cmd(manager):
         manager.startx()
@@ -1396,13 +1443,23 @@ if __name__ == '__main__':
         app = manager.apps[app_id]
         app.encrypt2(certificate)
 
+    def app_list_extensions_cmd(manager, app_id):
+        app = manager.apps[app_id]
+        for ext in sorted(app.extensions.values(), key=lambda e: e.id):
+            print('* {} ({})'.format(ext.id, ext.url))
+
+    cmd = subparsers.add_parser('app-list-extensions', description='TODO')
+    cmd.set_defaults(run=app_list_extensions_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+
     def app_add_extension_cmd(manager, app_id, extension_id):
         app = manager.apps[app_id]
         app.add_extension(extension_id)
+        print('Note that some extensions require an update of the application.')
 
     def app_remove_extension_cmd(manager, app_id, extension_id):
         app = manager.apps[app_id]
-        app.remove_extension(extension_id)
+        app.remove_extension(app.extensions[extension_id])
 
     cmd = subparsers.add_parser(
         'add',
@@ -1423,6 +1480,11 @@ if __name__ == '__main__':
         'list',
         description="""List all apps.""")
     cmd.set_defaults(run=list_cmd)
+
+    cmd = subparsers.add_parser(
+        'update',
+        description="""Update all apps.""")
+    cmd.set_defaults(run=update_cmd)
 
     cmd = subparsers.add_parser(
         'start',
