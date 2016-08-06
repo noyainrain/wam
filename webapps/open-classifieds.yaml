@@ -1,0 +1,24 @@
+download: https://github.com/open-classifieds/openclassifieds2.git#2.9.0
+mode: phpfpm
+stack: php5
+databases:
+    - mysql
+data_dirs:
+    - images
+    - oc/cache
+    - oc/logs
+files:
+    .user.ini: short_open_tag = 1
+hook: |
+    if [ -f install/install.lock ]; then
+        chmod o+w . install oc/config themes
+        echo "Open {app.url} and enter the following information:"
+        echo "* DB Configuration > Database name: {app.databases[mysql].name}"
+        echo "* DB Configuration > User name: {app.databases[mysql].user}"
+        echo "* DB Configuration > Password: {app.databases[mysql].secret}"
+        echo "* Site Configuration > Site Name: {app.id}"
+        echo "* Site Configuration > Administrator email: {wam.config[email]}"
+        echo "* Site Configuration > Admin Password: ***"
+    else
+        chmod o-w . install oc/config themes
+    fi

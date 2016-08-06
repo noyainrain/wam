@@ -71,6 +71,7 @@ _NGINX_PHPFPM_TEMPLATE = """\
 
     location / {{
         root {app.path.abs};
+        try_files $uri /index.php?$args;
 
         # TODO: Do not hardcode
         location ~ ^/data {{
@@ -503,25 +504,26 @@ class App:
             cmd = ['git', 'clone', '-q', '--recursive', '--single-branch', url, repo]
             if branch:
                 cmd[5:5] = ['-b', branch]
-            check_call(cmd)
+            try:
+                check_call(cmd)
+            except CalledProcessError:
+                raise OSError('git')
         else:
             self._logger.info('Pulling from %s', url)
-            # Discard all local changes to prevent merge problems
-            # TODO
-            #check_call(['git', '-C', repo, 'reset', '--hard'])
             try:
                 check_call(['git', '-C', repo, 'fetch'])
+                # If we are not on a branch (e.g. checked out a tag), FETCH_HEAD is needed
+                check_call(['git', '-C', repo, 'merge', 'FETCH_HEAD'])
+                check_call(['git', '-C', repo, 'submodule', 'update', '--recursive'])
             except CalledProcessError:
-                raise IOError('git')
-            check_call(['git', '-C', repo, 'merge'])
-            check_call(['git', '-C', repo, 'submodule', 'update', '--recursive'])
+                raise OSError('git')
 
     def _update_stack(self):
         # Stack = runtime + package manager
         self._logger.info('Updating stack')
         # js: (nodejs-legacy, npm + npm->bower) here we would have to implement class Npm also
         alias = {
-            'php5': ['php5-fpm', 'php5-mysqlnd', 'php5-gd'],
+            'php5': ['php5-fpm', 'php5-mcrypt', 'php5-mysqlnd', 'php5-gd'],
             'python3': ['python3-pip'],
             'ruby': ['bundler']
         }
