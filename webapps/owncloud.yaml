@@ -1,11 +1,6 @@
 download: https://github.com/owncloud/core.git#stable8.2
 mode: phpfpm
 stack: php5
-packages:
-    apt:
-        - php5-curl
-        - php5-gd
-        - php5-sqlite
 data_dirs:
     - config
     - data

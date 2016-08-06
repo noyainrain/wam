@@ -523,7 +523,8 @@ class App:
         self._logger.info('Updating stack')
         # js: (nodejs-legacy, npm + npm->bower) here we would have to implement class Npm also
         alias = {
-            'php5': ['php5-fpm', 'php5-mcrypt', 'php5-mysqlnd', 'php5-gd'],
+            'php5': ['php5-fpm', 'php5-gd', 'php5-curl', 'php5-mcrypt', 'php5-mysqlnd',
+                     'php5-sqlite'],
             'python3': ['python3-pip'],
             'ruby': ['bundler']
         }
@@ -1191,8 +1192,8 @@ class MySQL(SQLDatabaseEngine):
             check_call(['mysqldump', database.name], stdout=f)
 
     def do_restore(self, database, dump_path):
-        # TODO
-        pass
+        with open(dump_path) as f:
+            check_call(['mysql', database.name], stdin=f)
 
 class Redis(DatabaseEngine):
     id = 'redis'
