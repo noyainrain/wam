@@ -1,0 +1,27 @@
+download: https://github.com/helpyio/helpy.git#0.10.2
+stack: ruby
+packages:
+    apt:
+        - libgmp-dev
+        - libsqlite3-dev
+    bundler: []
+databases:
+    - postgresql
+data_dirs:
+    - log
+    - public/assets
+    - tmp
+jobs:
+    - env DATABASE_URL=postgresql://{app.databases[postgresql].user}:{app.databases[postgresql].secret}@localhost/{app.databases[postgresql].name} SECRET_KEY_BASE={app.secret} bundle exec rails server -e production -b localhost -p {app.port}
+hook: |
+    export DATABASE_URL=postgresql://{app.databases[postgresql].user}:{app.databases[postgresql].secret}@localhost/{app.databases[postgresql].name}
+    export SECRET_KEY_BASE={app.secret}
+    export RAILS_ENV=production
+    sudo -E -u www-data env PATH=$PATH bundle exec rake db:migrate
+    if [ ! -d tmp/cache/assets ]; then
+        sudo -E -u www-data env PATH=$PATH bundle exec rake db:seed
+        echo "To log in as administrator, use the following credentials:"
+        echo "* Email: admin@test.com"
+        echo "* Password: 12345678"
+    fi
+    sudo -E -u www-data env PATH=$PATH bundle exec rake assets:precompile

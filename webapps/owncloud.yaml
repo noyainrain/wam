@@ -1,4 +1,4 @@
-download: https://github.com/owncloud/core.git#stable8.2
+download: https://github.com/owncloud/core.git#stable9.1
 mode: phpfpm
 stack: php5
 data_dirs:
@@ -21,13 +21,16 @@ hook: |
 extension_path: apps
 default_extensions:
     # core
-    - https://github.com/owncloud/activity.git#stable8.2
-    - https://github.com/owncloud/files_texteditor.git#stable8.2
-    - https://github.com/owncloud/files_pdfviewer.git#stable8.2
-    - https://github.com/owncloud/firstrunwizard.git#stable8.2
-    - https://github.com/owncloud/gallery.git#stable8.2
-    - https://github.com/owncloud/notifications.git#stable8.2
-    - https://github.com/owncloud/templateeditor.git#stable8.2
-    # caldav + webdav
-    - https://github.com/owncloudarchive/calendar.git#stable8.2
-    - https://github.com/owncloudarchive/contacts.git#stable8.2
+    - https://github.com/owncloud/activity.git#stable9.1
+    - https://github.com/owncloud/files_antivirus.git#stable9.1
+    - https://github.com/owncloud/files_texteditor.git#stable9.1
+    - https://github.com/owncloud/files_pdfviewer.git#stable9.1
+    - https://github.com/owncloud/files_videoplayer.git#stable9.1
+    - https://github.com/owncloud/firstrunwizard.git#stable9.1
+    - https://github.com/owncloud/gallery.git#stable9.1
+    - https://github.com/owncloud/notifications.git#stable9.1
+    - https://github.com/owncloud/templateeditor.git#stable9.1
+    # https://github.com/owncloud/user_ldap has no suitable branches/tags
+    # CalDAV + CardDAV
+    - https://github.com/owncloud/calendar.git#v1.3.3
+    - https://github.com/owncloud/contacts.git#v1.4.0.0

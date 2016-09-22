@@ -6,6 +6,4 @@ packages:
 databases:
     - redis
 jobs:
-    -
-        cmd: python3 -m meetling --redis-url={databases[redis].name} --port {port}
-        cwd: "{path}"
+    - python3 -m meetling --redis-url={app.databases[redis].name} --port {app.port}

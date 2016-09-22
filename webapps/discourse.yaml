@@ -30,15 +30,13 @@ files:
         developer_emails = {wam.config[email]}
 # TODO: can one group this?
 jobs:
-    -
-        cmd: bundle exec rails server -e production -b localhost -p {port}
-        cwd: "{path}"
-    -
-        cmd: bundle exec sidekiq -e production
-        cwd: "{path}"
+    - bundle exec rails server -e production -b localhost -p {app.port}
+    #cmd: bundle exec rails server -b localhost -p {port}
+    - bundle exec sidekiq -q critical -q default -q low -e production
+    #cmd: bundle exec sidekiq
 hook: |
     psql -d {app.databases[postgresql].name} -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
     psql -d {app.databases[postgresql].name} -c "CREATE EXTENSION IF NOT EXISTS hstore;"
-    sudo -u www-data RAILS_ENV=production bundle exec rake db:migrate
-    sudo -u www-data RAILS_ENV=production bundle exec rake assets:precompile
+    sudo -E -u www-data env PATH=$PATH RAILS_ENV=production bundle exec rake db:migrate
+    sudo -E -u www-data env PATH=$PATH RAILS_ENV=production bundle exec rake assets:precompile
 extension_path: plugins

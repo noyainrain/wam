@@ -133,9 +133,22 @@ class AppTest(WamTestCase):
         with self.tmp_app({'default_extensions': ['.']}) as app:
             self.assertIn('wam', app.extensions)
 
+    def test_update_default_extensions_changed(self):
+        with self.tmp_app({'default_extensions': ['.']}) as app:
+            with open(app.software_id, 'w') as f:
+                f.write('default_extensions: [.#test]')
+            del self.manager.meta._cache[app.software_id] #XXX
+            app._software_meta = None
+            app.update()
+            self.assertEqual(app.extensions['wam'].url, '.#test')
+
     def test_update_stack(self):
         with self.tmp_app({'stack': ['python3']}) as app:
             self.assertEqual(call(['which', 'pip3']), 0)
+
+    def test_update_stack_ruby(self):
+        with self.tmp_app({'stack': ['ruby']}) as app:
+            self.assertTrue(check_output(['bash', '-c', '. /usr/local/share/chruby/chruby.sh && chruby']))
 
     def test_update_packages(self):
         meta = {
@@ -190,6 +203,11 @@ class AppTest(WamTestCase):
     def test_update_hook(self):
         with self.tmp_app({'hook': 'touch foo.txt'}) as app:
             self.assertTrue(os.path.isfile(os.path.join(app.path, 'foo.txt')))
+
+    def test_update_hook_stack_ruby(self):
+        with self.tmp_app({'stack': 'ruby', 'hook': 'echo $(chruby) > foo.txt'}) as app:
+            with open(os.path.join(app.path, 'foo.txt')) as f:
+                self.assertTrue(f.read())
 
     def test_backup(self):
         with self.tmp_app({'databases': ['postgresql'], 'data_dirs': ['a', 'b']}) as app:
@@ -271,6 +289,13 @@ class AppUpdateCodeTest(WamTestCase):
     #        with open(os.path.join(app.path, 'wam.py'), 'a') as f:
     #            f.write('# bar\n')
     #        app.update()
+
+class ExtensionTest(WamTestCase):
+    def test_set_url(self):
+        with self.tmp_app({'download': '.'}) as app:
+            ext = app.add_extension('.')
+            ext.set_url('.#test')
+            self.assertEqual(ext.url, '.#test')
 
 @contextmanager
 def tmp_software(meta):

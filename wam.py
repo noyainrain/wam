@@ -470,9 +470,16 @@ class App:
             self.start()
 
     def _update_default_extensions(self):
-        new = set(self.meta['default_extensions']) - {e.url for e in self.extensions.values()}
-        for url in new:
-            ext = Extension(url, self.id, self.wam)
+        default_exts = {reponame(u): u for u in self.meta['default_extensions']}
+        current = self.extensions.keys() & default_exts.keys()
+        new = default_exts.keys() - self.extensions.keys()
+        for id in current:
+            ext = self.extensions[id]
+            url = default_exts[id]
+            if ext.url != url:
+                ext.set_url(url)
+        for id in new:
+            ext = Extension(default_exts[id], self.id, self.wam)
             self.extensions[ext.id] = ext
 
     def _update_code(self):
@@ -497,9 +504,10 @@ class App:
         # git_root is always absolute, repo may or may not be
         repo_exists = (git_root == os.path.abspath(repo))
 
+        url, default_branch = urldefrag(url)
+        branch = branch or default_branch or 'master'
+
         if not repo_exists:
-            url, default_branch = urldefrag(url)
-            branch = branch or default_branch
             self._logger.info('Cloning from %s%s', url, '#' + branch if branch else '')
             cmd = ['git', 'clone', '-q', '--recursive', '--single-branch', url, repo]
             if branch:
@@ -511,9 +519,9 @@ class App:
         else:
             self._logger.info('Pulling from %s', url)
             try:
-                check_call(['git', '-C', repo, 'fetch'])
                 # If we are not on a branch (e.g. checked out a tag), FETCH_HEAD is needed
-                check_call(['git', '-C', repo, 'merge', 'FETCH_HEAD'])
+                check_call(['git', '-C', repo, 'fetch', 'origin', branch])
+                check_call(['git', '-C', repo, 'checkout', 'FETCH_HEAD'])
                 check_call(['git', '-C', repo, 'submodule', 'update', '--recursive'])
             except CalledProcessError:
                 raise OSError('git')
@@ -522,13 +530,25 @@ class App:
         # Stack = runtime + package manager
         self._logger.info('Updating stack')
         # js: (nodejs-legacy, npm + npm->bower) here we would have to implement class Npm also
+
+        if 'ruby' in self.meta['stack']:
+            if subprocess.call(['which', 'ruby-install']) != 0:
+                check_call(['git', 'clone', '--single-branch', '--branch=v0.6.0',
+                            'https://github.com/postmodern/ruby-install.git'], cwd='/tmp')
+                check_call(['sudo', 'make', 'install'], cwd='/tmp/ruby-install')
+            if subprocess.call(['which', 'chruby-exec']) != 0:
+                check_call(['git', 'clone', '--single-branch', '--branch=v0.3.9',
+                            'https://github.com/postmodern/chruby.git'], cwd='/tmp')
+                check_call(['sudo', 'make', 'install'], cwd='/tmp/chruby')
+            check_call(['sudo', 'ruby-install', '--no-reinstall', 'ruby'])
+            check_call(['sudo', 'bash', '-c', '. /usr/local/share/chruby/chruby.sh && chruby ruby && gem install bundler'])
+
         alias = {
             'php5': ['php5-fpm', 'php5-gd', 'php5-curl', 'php5-mcrypt', 'php5-mysqlnd',
                      'php5-sqlite'],
-            'python3': ['python3-pip'],
-            'ruby': ['bundler']
+            'python3': ['python3-pip']
         }
-        packages = set(chain.from_iterable(alias[s] for s in self.meta['stack']))
+        packages = set(chain.from_iterable(alias[s] for s in self.meta['stack'] if s in alias))
         self.install('apt', packages)
 
     def _update_packages(self):
@@ -536,6 +556,7 @@ class App:
         # TODO: Remove packages
         packages_meta = self.meta.get('packages', {})
         for engine, packages in packages_meta.items():
+            # TODO: install apt packages before others
             self.install(engine, set(packages))
 
     def _update_databases(self):
@@ -703,14 +724,10 @@ class App:
             # this is a restart, good idea here?
             self.stop()
 
-        # TODO: set cwd to app.path for all jobs
         self._logger.info('Starting %s', self.id)
         for job in self.meta['jobs']:
-            cmd = job['cmd'].format(**self.data)
-            cwd = job.get('cwd')
-            if cwd:
-                cwd = cwd.format(**self.data)
-            self.start_job(cmd, cwd=cwd)
+            cmd = job['cmd'].format(app=self, wam=self.manager)
+            self.start_job(cmd, cwd=self.path)
 
         self._call('start')
         sleep(2)
@@ -727,7 +744,11 @@ class App:
         sleep(2)
 
     def start_job(self, cmd, env={}, cwd=None):
-        args = shlex.split(cmd)
+        # TODO use self._script(cmd, job_user=True)
+        if 'ruby' in self.meta['stack']:
+            args =  ['bash', '-c', '. /usr/local/share/chruby/chruby.sh && chruby ruby && GEM_HOME=$GEM_ROOT exec ' + cmd]
+        else:
+            args = shlex.split(cmd)
         args = ['sudo', '-u', self.job_user, 'nohup'] + args
         envi = dict(os.environ)
         envi.update(env)
@@ -801,7 +822,7 @@ openssl x509 -in $DOMAIN.crt -text
         self.manager.nginx.configure()
 
     def add_extension(self, url):
-        if url in (e.url for e in self.extensions.values()):
+        if reponame(url) in self.extensions:
             raise ValueError('extension') #TODO
         ext = Extension(url, self.id, self.wam)
         self.extensions[ext.id] = ext
@@ -814,15 +835,20 @@ openssl x509 -in $DOMAIN.crt -text
         del self.extensions[ext.id]
         self.manager.store()
 
+    def _script(self, script):
+        # bash required by chruby
+        p = Popen(['bash', '-e'], stdin=subprocess.PIPE, cwd=self.path)
+        script = script.format(app=self, wam=self.manager)
+        if 'ruby' in self.meta['stack']:
+            script = '. /usr/local/share/chruby/chruby.sh\nchruby ruby\nexport GEM_HOME=$GEM_ROOT\n' + script
+        p.communicate(script.encode('utf-8'))
+        if p.returncode:
+            raise ScriptError()
+
     def _run_hook(self):
         if not self.meta['hook']:
             return
-
-        #['sudo', '-u', self.job_user, 'sh']
-        p = Popen(['sh', '-e'], stdin=subprocess.PIPE, cwd=self.path)
-        p.communicate(self.meta['hook'].format(app=self, wam=self.manager).encode('utf-8'))
-        if p.returncode:
-            raise ScriptError()
+        self._script(self.meta['hook'])
 
     def _call(self, op):
         if not self.meta['hooks']:
@@ -1046,9 +1072,9 @@ class Bundler(PackageEngine):
         if packages:
             # Implement?
             raise NotImplementedError()
-        # TODO: set path to app somehow here!!
-        check_call(['bundle', 'install', '--gemfile',
-                    os.path.join(app_path, 'Gemfile')])#, '--deployment'])
+        check_call([
+            'sudo', 'bash', '-c',
+            '. /usr/local/share/chruby/chruby.sh && chruby ruby && bundle install --gemfile ' + os.path.join(app_path, 'Gemfile')])
 
 class Bower(PackageEngine):
     def install(self, packages, app_path):
@@ -1257,7 +1283,7 @@ class Extension:
 
     @property
     def id(self):
-        return os.path.splitext(os.path.basename(os.path.abspath(urlparse(self.url).path)))[0]
+        return reponame(self.url)
 
     @property
     def app(self):
@@ -1267,11 +1293,24 @@ class Extension:
     def path(self):
         return os.path.join(self.app.path, self.app.meta['extension_path'], self.id)
 
+    def set_url(self, url):
+        # NOTE at the moment, one cannot change the repo name in the URL. later maybe store id as
+        # own field (automatically retrieved from url when ext is added), and make any url possible.
+        if reponame(url) != self.id:
+            raise ValueError('reponame') # TODO
+        # TODO implement new url, something like git remote set-url
+        self.url = url
+        self.app._update_repo(self.path, self.url)
+        self.wam.store()
+
     def json(self):
         return {
             'url': self.url,
             'app': self._app_id
         }
+
+def reponame(url):
+    return os.path.splitext(os.path.basename(os.path.abspath(urlparse(url).path)))[0]
 
 CRON_CONFIG_PATH = '/etc/cron.d/wam'
 
@@ -1463,6 +1502,17 @@ if __name__ == '__main__':
     def app_remove_extension_cmd(manager, app_id, extension_id):
         app = manager.apps[app_id]
         app.remove_extension(app.extensions[extension_id])
+
+    def extension_set_url_cmd(manager, app_id, extension_id, url):
+        app = manager.apps[app_id]
+        ext = app.extensions[extension_id]
+        ext.set_url(url)
+
+    cmd = subparsers.add_parser('extension-set-url', description='TODO')
+    cmd.set_defaults(run=extension_set_url_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+    cmd.add_argument('extension_id', help='Extension ID.')
+    cmd.add_argument('url', help='TODO.')
 
     cmd = subparsers.add_parser(
         'add',
