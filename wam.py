@@ -40,6 +40,7 @@ server {{
     server_name {host};
 {ssl_config}
 {location_config}
+{more}
 }}
 {ssl_redirect_config}
 """
@@ -50,6 +51,7 @@ _NGINX_PROXY_TEMPLATE = """\
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_pass http://localhost:{app.port};
+{more}
     }}
 """
 
@@ -103,6 +105,11 @@ server {{
     server_name {host};
     return 301 https://{host};
 }}
+"""
+
+_NGINX_PROTECT_TEMPLATE = """\
+auth_basic {id};
+auth_basic_user_file {auth_path};
 """
 
 import yaml
@@ -1026,16 +1033,20 @@ class Nginx:
                     app_certificate_key=os.path.abspath(app.certificate_key_path))
                 ssl_redirect_config = _NGINX_SSL_REDIRECT_TEMPLATE.format(host=app.id)
 
+            ext = ProtectExtension(self.manager)
+
             if app.meta['mode'] == 'proxy':
-                location_config = _NGINX_PROXY_TEMPLATE.format(app=app)
+                more = ext.get_nginx_proxy_config(app)
+                location_config = _NGINX_PROXY_TEMPLATE.format(app=app, more=more or '')
             elif app.meta['mode'] == 'phpfpm':
                 location_config = _NGINX_PHPFPM_TEMPLATE.format(app=app)
             else:
                 assert(False)
 
+            more = ext.get_nginx_server_config(app)
             servers.append(_NGINX_SERVER_TEMPLATE.format(
                 host=app.id, port=port, ssl_config=ssl_config, location_config=location_config,
-                ssl_redirect_config=ssl_redirect_config))
+                more=more or '', ssl_redirect_config=ssl_redirect_config))
 
         with open(self.config_path, 'w') as f:
             f.write(_NGINX_TEMPLATE.format(config='\n'.join(servers)))
@@ -1354,27 +1365,34 @@ class ScriptError(Exception):
 
 # setup
 # sudo -u www-data mkdir ext/protect
-# TODO: vllt uebetrieben, einfach nur ProtectExtension, mit protect(app) reicht
-# wohl...
-class ProtectApp:
-    def __init__(self, app):
-        self.app = app
-        self.manager = app.wam
+class ProtectExtension:
+    def __init__(self, manager):
+        self.manager = manager
 
-    @property
-    def protected(self):
-        return os.path.isfile(self.htpasswd_path)
-
-    @property
-    def htpasswd_path(self):
-        return os.path.join(self.manager.ext_path, 'protect/htpasswd')
-
-    def protect(self, pw):
-        # FIXME: python way? no pw over commandline!!!!
-        # FIXME: chmod!!!
-        # TODO: reenable
-        #check_call('htpasswd -bc {} "" {}'.format(self.htpasswd_path, pw))
+    def protect(self, app, user, pw):
+        from crypt import crypt
+        x = '{}:{}'.format(user, crypt(pw))
+        with open(self._get_auth_path(app), 'w') as f:
+            f.write(x)
         self.manager.nginx.configure()
+
+    def unprotect(self, app):
+        trash(self._get_auth_path(app))
+        self.manager.nginx.configure()
+
+    def get_nginx_server_config(self, app):
+        path = self._get_auth_path(app)
+        if os.path.isfile(path):
+            return _NGINX_PROTECT_TEMPLATE.format(id=app.id, auth_path=os.path.abspath(path))
+        return None
+
+    def get_nginx_proxy_config(self, app):
+        if os.path.isfile(self._get_auth_path(app)):
+            return 'proxy_set_header X-Forwarded-For 127.0.0.1;'
+        return None
+
+    def _get_auth_path(self, app):
+        return os.path.join(self.manager.ext_path, 'protect', app.id)
 
 # utilities
 
@@ -1610,15 +1628,23 @@ if __name__ == '__main__':
     cmd.add_argument('app_id', help='App ID.')
     cmd.add_argument('extension_id', help='TODO')
 
-    # extensions
-    def protect_app(manager, app_id, password):
+    def protect_app_cmd(manager, app_id, user, password):
+        ext = ProtectExtension(manager)
         app = manager.apps[app_id]
-        ProtectApp(app).protect(password)
+        ext.protect(app, user, password)
+    cmd = subparsers.add_parser('protect-app', description='TODO')
+    cmd.set_defaults(run=protect_app_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+    cmd.add_argument('user', help='TODO.')
+    cmd.add_argument('password', help='TODO.')
 
-    protect_app_cmd = subparsers.add_parser('protect-app')
-    protect_app_cmd.set_defaults(run=protect_app)
-    protect_app_cmd.add_argument('app_id')
-    protect_app_cmd.add_argument('password')
+    def unprotect_app_cmd(manager, app_id):
+        ext = ProtectExtension(manager)
+        app = manager.apps[app_id]
+        ext.unprotect(app)
+    cmd =subparsers.add_parser('unprotect-app', description='TODO.')
+    cmd.set_defaults(run=unprotect_app_cmd)
+    cmd.add_argument('app_id', help='App ID.')
 
     args = vars(parser.parse_args())
     #print(args)
