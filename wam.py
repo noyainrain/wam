@@ -108,8 +108,8 @@ server {{
 """
 
 _NGINX_PROTECT_TEMPLATE = """\
-auth_basic {id};
-auth_basic_user_file {auth_path};
+    auth_basic {id};
+    auth_basic_user_file {auth_path};
 """
 
 import yaml
@@ -1122,6 +1122,7 @@ class DatabaseEngine:
 class SQLDatabaseEngine(DatabaseEngine):
     create_user_query = None
     grant_query = None
+    quote = '"'
 
     def create(self, name, user, secret):
         db = self.connect()
@@ -1129,7 +1130,7 @@ class SQLDatabaseEngine(DatabaseEngine):
         db.autocommit = True
         c = db.cursor()
         c.execute(self.create_user_query.format(user=user, secret=secret))
-        c.execute("CREATE DATABASE {}".format(name))
+        c.execute('CREATE DATABASE {q}{}{q}'.format(name, q=self.quote))
         c.execute(self.grant_query.format(name=name, user=user))
         db.close()
         return Database(self.id, name, user, secret)
@@ -1139,10 +1140,10 @@ class SQLDatabaseEngine(DatabaseEngine):
         # See create()
         db.autocommit = True
         c = db.cursor()
-        c.execute('DROP DATABASE IF EXISTS {}'.format(database.name))
+        c.execute('DROP DATABASE IF EXISTS {q}{}{q}'.format(database.name, q=self.quote))
         try:
             # mysql has no IF EXISTS or something...
-            c.execute('DROP USER {}'.format(database.user))
+            c.execute('DROP USER {q}{}{q}'.format(database.user, q=self.quote))
         except:
             # user (most likely) does not exist, ignore
             pass
@@ -1152,8 +1153,8 @@ class SQLDatabaseEngine(DatabaseEngine):
         db = self.connect()
         db.autocommit = True
         c = db.cursor()
-        c.execute('DROP DATABASE {}'.format(database.name))
-        c.execute('CREATE DATABASE {}'.format(database.name))
+        c.execute('DROP DATABASE {q}{}{q}'.format(database.name, q=self.quote))
+        c.execute('CREATE DATABASE {q}{}{q}'.format(database.name, q=self.quote))
         c.execute(self.grant_query.format(name=database.name, user=database.user))
         db.close()
         self.do_restore(database, dump_path)
@@ -1164,8 +1165,8 @@ class SQLDatabaseEngine(DatabaseEngine):
 class PostgreSQL(SQLDatabaseEngine):
     id = 'postgresql'
     dump_name = 'postgresql.sql'
-    create_user_query = "CREATE USER {user} PASSWORD '{secret}'"
-    grant_query = "GRANT ALL ON DATABASE {name} TO {user}"
+    create_user_query = 'CREATE USER "{user}" PASSWORD \'{secret}\''
+    grant_query = 'GRANT ALL ON DATABASE "{name}" TO "{user}"'
 
     def setup(self):
         try:
@@ -1199,8 +1200,9 @@ password = {pw}
 class MySQL(SQLDatabaseEngine):
     id = 'mysql'
     dump_name = 'mysql.sql'
-    create_user_query = "CREATE USER {user} IDENTIFIED BY '{secret}'"
-    grant_query = "GRANT ALL ON {name}.* TO {user}"
+    create_user_query = 'CREATE USER "{user}" IDENTIFIED BY "{secret}"'
+    grant_query = 'GRANT ALL ON `{name}`.* TO "{user}"'
+    quote = '`'
 
     def setup(self):
         try:
@@ -1388,7 +1390,7 @@ class ProtectExtension:
 
     def get_nginx_proxy_config(self, app):
         if os.path.isfile(self._get_auth_path(app)):
-            return 'proxy_set_header X-Forwarded-For 127.0.0.1;'
+            return '        proxy_set_header X-Forwarded-For 127.0.0.1;'
         return None
 
     def _get_auth_path(self, app):
