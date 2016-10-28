@@ -30,6 +30,9 @@ _NGINX_CONFIG_PATH = '/etc/nginx/conf.d/wam.conf'
 
 _NGINX_TEMPLATE = """\
 client_max_body_size 512m;
+# Make longer domain names possible
+server_names_hash_bucket_size 64;
+proxy_headers_hash_bucket_size 64;
 
 {config}
 """
@@ -73,7 +76,7 @@ _NGINX_PHPFPM_TEMPLATE = """\
 
     location / {{
         root {app.path.abs};
-        try_files $uri /index.php?$args;
+        try_files $uri $uri/ /index.php?$args;
 
         # TODO: Do not hardcode
         location ~ ^/data {{
