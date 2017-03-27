@@ -12,7 +12,7 @@ import shlex
 import argparse
 import shutil
 from time import sleep
-from itertools import chain
+from itertools import chain, groupby
 from collections.abc import Mapping
 from subprocess import Popen, CalledProcessError, check_call, check_output
 from shutil import copyfile, copytree, make_archive
@@ -42,19 +42,18 @@ server {{
     listen {port};
     server_name {host};
 {ssl_config}
-{location_config}
+{locations}
 {more}
 }}
 {ssl_redirect_config}
 """
 
 _NGINX_PROXY_TEMPLATE = """\
-    location / {{
+    location {app.url.slashed_path} {{
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_pass http://localhost:{app.port};
-{more}
     }}
 """
 
@@ -72,11 +71,14 @@ _NGINX_STATIC_TEMPLATE = """\
 """
 
 _NGINX_PHPFPM_TEMPLATE = """\
+    # TODO: move into location
     index index.php;
 
-    location / {{
+    location {app.url.slashed_path} {{
         root {app.path.abs};
-        try_files $uri $uri/ /index.php?$args;
+        try_files $uri $uri/ {app.url.path}/index.php?$args;
+        #alias {app.path.abs}/;
+        #index index.php;
 
         # TODO: Do not hardcode
         location ~ ^/data {{
@@ -84,9 +86,12 @@ _NGINX_PHPFPM_TEMPLATE = """\
         }}
     }}
 
+    # TODO: move to top location
     location ~ \.php(/|$) {{
         root {app.path.abs};
+        #alias {app.path.abs};
         fastcgi_split_path_info ^(.+?\.php)(/.*)?$;
+        #fastcgi_split_path_info ^{app.url.path}(.+?\.php)(/.*)?$;
         try_files $fastcgi_script_name =404;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         # http://trac.nginx.org/nginx/ticket/321
@@ -414,13 +419,13 @@ class App:
 
     @property
     def url(self):
-        return 'http://{}/'.format(self.id)
-
-    @property
-    def dbuser(self):
-        # TODO random user id
-        # mysql user name max length 16
-        return self.sid[:16]
+        class urlstr(str):
+            def __init__(self, value):
+                tokens = urlparse(value)
+                self.host = tokens.hostname
+                self.path = tokens.path
+                self.slashed_path = self.path or '/'
+        return urlstr('http://{}'.format(self.id))
 
     @property
     def is_running(self):
@@ -814,8 +819,11 @@ openssl req -new -key $DOMAIN.key -subj / -out $DOMAIN.csr
 # show certificate details
 openssl x509 -in $DOMAIN.crt -text
         """
+        if self.url.path:
+            raise ValueError('app_url_not_root')
         if self.encrypted:
             raise ValueError('app_already_encrypted')
+
         # TODO is thre a python way to do this?
         call('openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out {}'.format(
             self.certificate_key_path))
@@ -950,8 +958,7 @@ openssl x509 -in $DOMAIN.crt -text
         if engine not in self.manager._database_engines:
             raise ValueError('engine_unknown')
         self._logger.info('Creating %s database', engine)
-        database = self.manager._database_engines[engine].create(
-            self.sid, self.dbuser, self.secret)
+        database = self.manager._database_engines[engine].create(self.sid, self.secret)
         self.databases[database.engine] = database
         self.manager.store()
         return database
@@ -1025,7 +1032,12 @@ class Nginx:
 
     def configure(self):
         servers = []
-        for app in self.manager.apps.values():
+
+        apps = sorted(self.manager.apps.values(), key=lambda a: (a.url.host, a.url.path))
+        for host, group in groupby(apps, lambda a: a.url.host):
+            group = list(group)
+            app = group[0]
+
             port = '80'
             ssl_config = ''
             ssl_redirect_config = ''
@@ -1037,19 +1049,23 @@ class Nginx:
                 ssl_redirect_config = _NGINX_SSL_REDIRECT_TEMPLATE.format(host=app.id)
 
             ext = ProtectExtension(self.manager)
-
-            if app.meta['mode'] == 'proxy':
-                more = ext.get_nginx_proxy_config(app)
-                location_config = _NGINX_PROXY_TEMPLATE.format(app=app, more=more or '')
-            elif app.meta['mode'] == 'phpfpm':
-                location_config = _NGINX_PHPFPM_TEMPLATE.format(app=app)
-            else:
-                assert(False)
-
             more = ext.get_nginx_server_config(app)
+
+            locations = []
+            for app in group:
+                if app.meta['mode'] == 'proxy':
+                    #more = ext.get_nginx_proxy_config(app)
+                    location_config = _NGINX_PROXY_TEMPLATE.format(app=app)
+                elif app.meta['mode'] == 'phpfpm':
+                    location_config = _NGINX_PHPFPM_TEMPLATE.format(app=app)
+                else:
+                    assert(False)
+                locations.append(location_config)
+            locations = '\n'.join(locations)
+
             servers.append(_NGINX_SERVER_TEMPLATE.format(
-                host=app.id, port=port, ssl_config=ssl_config, location_config=location_config,
-                more=more or '', ssl_redirect_config=ssl_redirect_config))
+                host=host, port=port, ssl_config=ssl_config, locations=locations, more=more or '',
+                ssl_redirect_config=ssl_redirect_config))
 
         with open(self.config_path, 'w') as f:
             f.write(_NGINX_TEMPLATE.format(config='\n'.join(servers)))
@@ -1110,7 +1126,7 @@ class DatabaseEngine:
     def connect(self):
         raise NotImplementedError()
 
-    def create(self, name, user, secret):
+    def create(self, name, secret):
         raise NotImplementedError()
 
     def delete(self, database):
@@ -1127,7 +1143,8 @@ class SQLDatabaseEngine(DatabaseEngine):
     grant_query = None
     quote = '"'
 
-    def create(self, name, user, secret):
+    def create(self, name, secret):
+        user = randstr()
         db = self.connect()
         # Some databases (like PostgreSQL) don't like CREATE statements in transactions
         db.autocommit = True
@@ -1251,14 +1268,14 @@ class Redis(DatabaseEngine):
         except ImportError:
             Apt().install({'redis-server', 'python3-redis'}, None)
 
-    def create(self, name, user, secret):
+    def create(self, name, secret):
         taken = {int(d.name) for d in self.get_redis_databases()}
         free = set(range(8, 15)) - taken
         if not free:
             # TODO: what to do here?
             raise ValueError()
         # TODO: order somehow?
-        return Database(self.id, free.pop(), user, secret)
+        return Database(self.id, free.pop(), None, secret)
 
     def delete(self, database):
         # NOTE: we could flush the db
@@ -1375,6 +1392,9 @@ class ProtectExtension:
         self.manager = manager
 
     def protect(self, app, user, pw):
+        if app.url.path:
+            raise ValueError('app_url_not_root')
+
         from crypt import crypt
         x = '{}:{}'.format(user, crypt(pw))
         with open(self._get_auth_path(app), 'w') as f:
@@ -1391,10 +1411,10 @@ class ProtectExtension:
             return _NGINX_PROTECT_TEMPLATE.format(id=app.id, auth_path=os.path.abspath(path))
         return None
 
-    def get_nginx_proxy_config(self, app):
-        if os.path.isfile(self._get_auth_path(app)):
-            return '        proxy_set_header X-Forwarded-For 127.0.0.1;'
-        return None
+    #def get_nginx_proxy_config(self, app):
+    #    if os.path.isfile(self._get_auth_path(app)):
+    #        return '        proxy_set_header X-Forwarded-For 127.0.0.1;'
+    #    return None
 
     def _get_auth_path(self, app):
         return os.path.join(self.manager.ext_path, 'protect', app.id)
