@@ -278,7 +278,7 @@ class WebAppManager:
 
         secret = randstr()
         app = App(url, software_id, port, secret, {}, {}, databases={}, extensions={}, wam=self,
-                  branch=branch)
+                  branch=None)
         self.apps[app.id] = app
         mkdir(app.path)
         self.nginx.configure()
@@ -286,7 +286,7 @@ class WebAppManager:
 
         try:
             #app.setup()
-            app.update(fresh=True)
+            app.update(branch=branch, fresh=True)
             return app
         except ScriptError:
             self.logger.error('app setup failed')
@@ -454,8 +454,11 @@ class App:
             'databases': self.databases
         }
 
-    def update(self, fresh=False):
+    def update(self, branch=None, fresh=False):
         self._logger.info('Updating %s', self.id)
+
+        if branch:
+            self.branch = branch
 
         # TODO: fresh not via paramater, but as state/property
         if not fresh:
@@ -808,6 +811,16 @@ class App:
 
     def encrypt(self):
         """See :ref:`wam app-encrypt`."""
+
+        # TODO: add cert to ssl config
+        # TODO: encrypt not optional anymore, get certificate on add :)
+
+        # TODO: sudo certbot certonly -n --nginx -d stats.inrain.org
+
+        # TODO: there is bug with duplicate hash bucket size (i guess because it only looks in nginx
+        # conf and not conf.d/*)
+        # https://github.com/certbot/certbot/pull/924/files
+
         """
 export DOMAIN=foo.inrain.org
 # generate private key
@@ -1486,7 +1499,8 @@ if __name__ == '__main__':
 
     def list_cmd(manager):
         for app in sorted(manager.apps.values(), key=lambda a: a.id):
-            print('* {} [{}]'.format(app.id, 'running' if app.is_running else 'stopped'))
+            print('* {} [{}]{}'.format(app.id, 'running' if app.is_running else 'stopped',
+                                       ' [\u03bb{}]'.format(app.branch) if app.branch else ''))
 
     def update_cmd(manager):
         manager.update()
@@ -1497,9 +1511,16 @@ if __name__ == '__main__':
     def stop_cmd(manager):
         manager.stop()
 
-    def app_update_cmd(manager, app_id):
+    def app_update_cmd(manager, app_id, **opts):
         app = manager.apps[app_id]
-        app.update()
+        app.update(**opts)
+
+    cmd = subparsers.add_parser(
+        'app-update',
+        description="""Update the app.""")
+    cmd.set_defaults(run=app_update_cmd)
+    cmd.add_argument('app_id', help='App ID.')
+    cmd.add_argument('--branch', help='TODO.')
 
     def app_start_cmd(manager, app_id):
         app = manager.apps[app_id]
@@ -1591,12 +1612,6 @@ if __name__ == '__main__':
         'stop',
         description="""Stop all apps.""")
     cmd.set_defaults(run=stop_cmd)
-
-    cmd = subparsers.add_parser(
-        'app-update',
-        description="""Update the app.""")
-    cmd.set_defaults(run=app_update_cmd)
-    cmd.add_argument('app_id', help='App ID.')
 
     cmd = subparsers.add_parser(
         'app-start',

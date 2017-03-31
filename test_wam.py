@@ -262,7 +262,7 @@ class AppUpdateCodeTest(WamTestCase):
         super().setUp()
         self.remote = mkdtemp()
         check_output(['git', 'clone', '-q', '.', self.remote])
-        check_output(['git', '-C', self.remote, 'branch', 'test'])
+        check_output(['git', '-C', self.remote, 'branch', 'test', 'HEAD^'])
 
     def commit(self, path, text):
         with open(os.path.join(self.remote, path), 'a') as f:
@@ -273,9 +273,10 @@ class AppUpdateCodeTest(WamTestCase):
         with self.tmp_app({'download': self.remote}) as app:
             self.assertTrue(os.path.isfile(os.path.join(app.path, 'wam.py')))
 
-    def test_update_code_branch_test(self):
-        with tmp_software({'download': self.remote}) as software_id:
-            app = self.manager.add(software_id, 'localhoax', branch='test')
+    def test_update_code_branch(self):
+        with self.tmp_app({'download': self.remote}) as app:
+            app.update(branch='test')
+            self.assertEqual(app.branch, 'test')
             self.assertTrue(os.path.isfile(os.path.join(app.path, 'wam.py')))
 
     def test_update_code_remote_changes(self):

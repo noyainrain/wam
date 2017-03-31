@@ -1,4 +1,4 @@
-download: https://github.com/helpyio/helpy.git#0.10.2
+download: https://github.com/helpyio/helpy.git
 stack: ruby
 packages:
     apt:

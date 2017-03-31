@@ -1,4 +1,4 @@
-download: https://github.com/piwik/piwik.git#2.16.1
+download: https://github.com/piwik/piwik.git
 mode: phpfpm
 stack: php5
 databases:

@@ -1,4 +1,4 @@
-download: https://github.com/open-classifieds/openclassifieds2.git#2.9.0
+download: https://github.com/open-classifieds/openclassifieds2.git
 mode: phpfpm
 stack: php5
 databases:
