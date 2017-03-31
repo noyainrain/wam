@@ -10,9 +10,10 @@ databases:
 data_dirs:
     - log
     - public/assets
+    - public/uploads
     - tmp
 jobs:
-    - env DATABASE_URL=postgresql://{app.databases[postgresql].user}:{app.databases[postgresql].secret}@localhost/{app.databases[postgresql].name} SECRET_KEY_BASE={app.secret} bundle exec rails server -e production -b localhost -p {app.port}
+    - env DATABASE_URL=postgresql://{app.databases[postgresql].user}:{app.databases[postgresql].secret}@localhost/{app.databases[postgresql].name} SECRET_KEY_BASE={app.secret} RAILS_SERVE_STATIC_FILES=1 bundle exec rails server -e production -b localhost -p {app.port}
 hook: |
     export DATABASE_URL=postgresql://{app.databases[postgresql].user}:{app.databases[postgresql].secret}@localhost/{app.databases[postgresql].name}
     export SECRET_KEY_BASE={app.secret}
