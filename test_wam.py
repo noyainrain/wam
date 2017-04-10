@@ -23,7 +23,7 @@ class WamTestCase(TestCase):
         #print(d)
         #os.mkdir(d)
         #d = mkdtemp()
-        config = {'data_path': d}
+        config = {'data_path': d, 'certbot': False}
         args.setdefault('nginx_config_path', '/tmp/wam.conf')
         args.setdefault('auto_backup', False)
 
@@ -39,14 +39,6 @@ class WamTestCase(TestCase):
         with tmp_software(meta) as software_id:
             app = self.manager.add(software_id, id)
             yield app
-
-    @staticmethod
-    def sign_csr(csr):
-        cakey = '/tmp/ca.key'
-        certificate = '/tmp/certificate.crt'
-        check_output(['openssl', 'genpkey', '-algorithm', 'RSA', '-out', cakey])
-        check_output(['openssl', 'x509', '-req', '-in', csr, '-signkey', cakey, '-out', certificate])
-        return certificate
 
 def process_exists(pid):
     try:
@@ -225,21 +217,6 @@ class AppTest(WamTestCase):
             self.assertTrue(os.path.isfile(os.path.join(app.path, 'a/test.json')))
             self.assertFalse(os.path.exists(os.path.join(app.path, 'a/Gemfile')))
 
-    def test_encrypt(self):
-        csr = self.app.encrypt()
-        self.assertFalse(self.app.encrypted)
-        # TODO: somehow validate csr??
-
-    def test_encrypt_app_url_not_root(self):
-        with self.tmp_app(id='localhoax/foo') as app:
-            with self.assertRaisesRegex(ValueError, 'app_url_not_root'):
-                app.encrypt()
-
-    def test_encrypt2(self):
-        certificate = self.sign_csr(self.app.encrypt())
-        self.app.encrypt2(certificate)
-        self.assertTrue(self.app.encrypted)
-
     def test_add_extension(self):
         with self.tmp_app({'download': '.'}) as app:
             ext = app.add_extension('.')
@@ -345,19 +322,6 @@ class NginxTest(WamTestCase):
                 with self.tmp_app({'mode': 'phpfpm'}, id='localhoax/foo'):
                     self.manager.nginx.configure()
                     self.assertGoodConfig()
-
-    def test_configure_ssl(self):
-        # XXX: somehow nginx doesnt like our self-signed certificate. what are we doing wrong?
-        return
-
-        with self.tmp_app() as app:
-            csr = app.encrypt()
-            certificate = self.sign_csr(csr)
-            app.encrypt2(certificate)
-
-            check_call(['cat', '/tmp/wam.conf'])
-            self.manager.nginx.configure()
-            self.assertGoodConfig()
 
     def assertGoodConfig(self):
         if call(['sudo', 'nginx', '-c', os.path.abspath('res/nginx.conf'), '-t']):

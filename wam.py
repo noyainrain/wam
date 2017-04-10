@@ -28,24 +28,32 @@ from datetime import datetime
 
 _NGINX_CONFIG_PATH = '/etc/nginx/conf.d/wam.conf'
 
+# TODO: certbot causes a duplicate hash bucket size error
+# (https://github.com/certbot/certbot/pull/924/files)
 _NGINX_TEMPLATE = """\
 client_max_body_size 512m;
 # Make longer domain names possible
-server_names_hash_bucket_size 64;
-proxy_headers_hash_bucket_size 64;
+#server_names_hash_bucket_size 64;
+#proxy_headers_hash_bucket_size 64;
 
 {config}
 """
 
 _NGINX_SERVER_TEMPLATE = """\
 server {{
-    listen {port};
+    listen 443 ssl;
     server_name {host};
-{ssl_config}
+    ssl_certificate /etc/letsencrypt/live/{host}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{host}/privkey.pem;
 {locations}
 {more}
 }}
-{ssl_redirect_config}
+
+server {{
+    listen 80;
+    server_name {host};
+    return 301 https://{host};
+}}
 """
 
 _NGINX_PROXY_TEMPLATE = """\
@@ -100,19 +108,6 @@ _NGINX_PHPFPM_TEMPLATE = """\
         include fastcgi_params;
         fastcgi_pass unix:/var/run/php5-fpm.sock;
     }}
-"""
-
-_NGINX_SSL_TEMPLATE = """
-    ssl_certificate {app_certificate};
-    ssl_certificate_key {app_certificate_key};
-"""
-
-_NGINX_SSL_REDIRECT_TEMPLATE = """
-server {{
-    listen 80;
-    server_name {host};
-    return 301 https://{host};
-}}
 """
 
 _NGINX_PROTECT_TEMPLATE = """\
@@ -170,14 +165,14 @@ class WebAppManager:
             'user': None,
             'password': None,
             'email': None,
-            'port_range': '8000-8079'
+            'port_range': '8000-8079',
+            'certbot': True
         }
         self.config.update(config)
 
         self.data_path = self.config['data_path']
         self.store_path = os.path.join(self.data_path, 'wam.json')
         self.backup_path = os.path.join(self.data_path, 'backups')
-        self.ssl_path = os.path.join(self.data_path, 'ssl')
         self.ext_path = os.path.join(self.data_path, 'ext')
         self.auto_backup = auto_backup
 
@@ -216,7 +211,7 @@ class WebAppManager:
         self._database_engines = self.database_engines
 
     def start(self):
-        for d in [self.data_path, self.backup_path, self.ssl_path, self.ext_path]:
+        for d in [self.data_path, self.backup_path, self.ext_path]:
             try:
                 os.mkdir(d)
             except FileExistsError:
@@ -279,8 +274,15 @@ class WebAppManager:
         secret = randstr()
         app = App(url, software_id, port, secret, {}, {}, databases={}, extensions={}, wam=self,
                   branch=None)
+
+        # Get TLS certificate
+        if self.config['certbot']:
+            self.nginx.configure(tmp_host=app.url.host)
+            check_call(['sudo', 'certbot', 'certonly', '-n', '--nginx', '-d', app.url.host])
+
         self.apps[app.id] = app
         mkdir(app.path)
+
         self.nginx.configure()
         self.store()
 
@@ -305,6 +307,8 @@ class WebAppManager:
             self.logger.error('app cleanup failed, continuing removal')
         trash(app.path)
         del self.apps[app.id]
+        # Remove TLS certificate
+        # sudo certbot revoke -n --cert-path=/etc/letsencrypt/live/{app.id}/cert.pem
         self.nginx.configure()
         self.store()
 
@@ -430,19 +434,6 @@ class App:
     @property
     def is_running(self):
         return bool(self.meta['mode'] == 'phpfpm' or self.pids)
-
-    # FIXME: use app.sid for cert paths
-    @property
-    def certificate_path(self):
-        return os.path.join(self.wam.config['data_path'], 'ssl', self.id + '.crt')
-
-    @property
-    def certificate_key_path(self):
-        return os.path.join(self.wam.config['data_path'], 'ssl', self.id + '.key')
-
-    @property
-    def encrypted(self):
-        return os.path.isfile(self.certificate_path)
 
     @property
     def data(self):
@@ -809,49 +800,6 @@ class App:
         self.wam.cron.configure()
         self.manager.store()
 
-    def encrypt(self):
-        """See :ref:`wam app-encrypt`."""
-
-        # TODO: add cert to ssl config
-        # TODO: encrypt not optional anymore, get certificate on add :)
-
-        # TODO: sudo certbot certonly -n --nginx -d stats.inrain.org
-
-        # TODO: there is bug with duplicate hash bucket size (i guess because it only looks in nginx
-        # conf and not conf.d/*)
-        # https://github.com/certbot/certbot/pull/924/files
-
-        """
-export DOMAIN=foo.inrain.org
-# generate private key
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out $DOMAIN.key
-# Generate certificate signing request. Details are ignored by StartSSL, so set
-# an empty subject string.
-openssl req -new -key $DOMAIN.key -subj / -out $DOMAIN.csr
-# do: upload csr to and download crt from StartSSL
-# show certificate details
-openssl x509 -in $DOMAIN.crt -text
-        """
-        if self.url.path:
-            raise ValueError('app_url_not_root')
-        if self.encrypted:
-            raise ValueError('app_already_encrypted')
-
-        # TODO is thre a python way to do this?
-        call('openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out {}'.format(
-            self.certificate_key_path))
-        csr_path = os.path.join(self.wam.config['data_path'], 'ssl', self.id + '.csr')
-        call('openssl req -new -key {} -subj / -out {}'.format(
-            self.certificate_key_path, csr_path))
-        return csr_path
-
-    def encrypt2(self, certificate):
-        """See :ref:`wam app-encrypt2`."""
-        copyfile(certificate, self.certificate_path)
-        # TODO: validate certificate somehow
-        call('openssl x509 -in {} -text'.format(self.certificate_path))
-        self.manager.nginx.configure()
-
     def add_extension(self, url):
         if reponame(url) in self.extensions:
             raise ValueError('extension') #TODO
@@ -1043,23 +991,13 @@ class Nginx:
         self.manager = manager
         self.config_path = config_path
 
-    def configure(self):
+    def configure(self, tmp_host=None):
         servers = []
 
         apps = sorted(self.manager.apps.values(), key=lambda a: (a.url.host, a.url.path))
         for host, group in groupby(apps, lambda a: a.url.host):
             group = list(group)
             app = group[0]
-
-            port = '80'
-            ssl_config = ''
-            ssl_redirect_config = ''
-            if app.encrypted:
-                port = '443 ssl'
-                ssl_config = _NGINX_SSL_TEMPLATE.format(
-                    app_certificate=os.path.abspath(app.certificate_path),
-                    app_certificate_key=os.path.abspath(app.certificate_key_path))
-                ssl_redirect_config = _NGINX_SSL_REDIRECT_TEMPLATE.format(host=app.id)
 
             ext = ProtectExtension(self.manager)
             more = ext.get_nginx_server_config(app)
@@ -1076,9 +1014,11 @@ class Nginx:
                 locations.append(location_config)
             locations = '\n'.join(locations)
 
-            servers.append(_NGINX_SERVER_TEMPLATE.format(
-                host=host, port=port, ssl_config=ssl_config, locations=locations, more=more or '',
-                ssl_redirect_config=ssl_redirect_config))
+            servers.append(_NGINX_SERVER_TEMPLATE.format(host=host, locations=locations,
+                                                         more=more or ''))
+
+        if tmp_host:
+            servers.append('server {{ server_name {host}; }}'.format(host=tmp_host))
 
         with open(self.config_path, 'w') as f:
             f.write(_NGINX_TEMPLATE.format(config='\n'.join(servers)))
@@ -1539,16 +1479,6 @@ if __name__ == '__main__':
         app = manager.apps[app_id]
         app.restore(backup)
 
-    def app_encrypt_cmd(manager, app_id):
-        app = manager.apps[app_id]
-        csr = app.encrypt()
-        print('Certificate signing request created at: {}'.format(csr))
-        print('Please submit it to your CA and then call app-encrypt2 with the signed certificate.')
-
-    def app_encrypt2_cmd(manager, app_id, certificate):
-        app = manager.apps[app_id]
-        app.encrypt2(certificate)
-
     def app_list_extensions_cmd(manager, app_id):
         app = manager.apps[app_id]
         for ext in sorted(app.extensions.values(), key=lambda e: e.id):
@@ -1640,23 +1570,6 @@ if __name__ == '__main__':
     cmd.set_defaults(run=app_restore_cmd)
     cmd.add_argument('app_id', help='App ID.')
     cmd.add_argument('backup', help='Path to the backup directory that holds the data to restore.')
-
-    cmd = subparsers.add_parser(
-        'app-encrypt',
-        description="""Enable SSL encryption for the app.
-
-        The first step creates a certificate signing request, ready to be submitted to a CA.""")
-    cmd.set_defaults(run=app_encrypt_cmd)
-    cmd.add_argument('app_id', help='App ID.')
-
-    cmd = subparsers.add_parser(
-        'app-encrypt2',
-        description="""Enable SSL encryption for the app.
-
-        The second and last step applies the signed certificate.""")
-    cmd.set_defaults(run=app_encrypt2_cmd)
-    cmd.add_argument('app_id', help='App ID.')
-    cmd.add_argument('certificate', help='Path of the signed certificate file.')
 
     cmd = subparsers.add_parser('app-add-extension', description='TODO')
     cmd.set_defaults(run=app_add_extension_cmd)
