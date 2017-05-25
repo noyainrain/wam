@@ -429,7 +429,7 @@ class App:
                 self.host = tokens.hostname
                 self.path = tokens.path
                 self.slashed_path = self.path or '/'
-        return urlstr('http://{}'.format(self.id))
+        return urlstr('https://{}'.format(self.id))
 
     @property
     def is_running(self):
