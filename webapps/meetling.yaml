@@ -7,5 +7,5 @@ packages:
 databases:
     - redis
 jobs:
-    - python3 -m meetling --redis-url={app.databases[redis].name} --port {app.port}
+    - python3 -m meetling --url={app.url} --redis-url={app.databases[redis].name} --port {app.port}
 hook: make deps
