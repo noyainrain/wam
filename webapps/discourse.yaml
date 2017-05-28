@@ -28,15 +28,14 @@ files:
         serve_static_assets = true
         serve_static_files = true
         developer_emails = {wam.config[email]}
-# TODO: can one group this?
 jobs:
     - bundle exec rails server -e production -b localhost -p {app.port}
-    #cmd: bundle exec rails server -b localhost -p {port}
     - bundle exec sidekiq -q critical -q default -q low -e production
-    #cmd: bundle exec sidekiq
 hook: |
     psql -d {app.databases[postgresql].name} -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
     psql -d {app.databases[postgresql].name} -c "CREATE EXTENSION IF NOT EXISTS hstore;"
     sudo -E -u www-data env PATH=$PATH RAILS_ENV=production bundle exec rake db:migrate
     sudo -E -u www-data env PATH=$PATH RAILS_ENV=production bundle exec rake assets:precompile
+    # Use the default Puma config
+    rm -f config/puma.rb
 extension_path: plugins
