@@ -1,9 +1,7 @@
 download: https://github.com/NoyaInRain/meetling.git
-stack: python3
-packages:
-    apt:
-        - npm
-        - nodejs-legacy
+stack:
+    - python3
+    - nodejs
 databases:
     - redis
 jobs:

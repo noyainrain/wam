@@ -13,9 +13,11 @@ databases:
     - redis
 data_dirs:
     - log
-    - public/uploads
     - public/assets
     - public/backups
+    - public/images
+    - public/plugins
+    - public/uploads
     - tmp
 files:
     config/discourse.conf: |

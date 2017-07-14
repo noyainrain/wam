@@ -553,6 +553,7 @@ class App:
             check_call(['sudo', 'bash', '-c', '. /usr/local/share/chruby/chruby.sh && chruby ruby && gem install bundler'])
 
         alias = {
+            'nodejs': ['nodejs'],
             'php5': ['php5-fpm', 'php5-gd', 'php5-curl', 'php5-mcrypt', 'php5-mysqlnd',
                      'php5-sqlite'],
             'python3': ['python3-pip']
@@ -668,7 +669,7 @@ class App:
             # TODO comment about why some apps are stupid and with chmod
             d = os.path.join(self.path, data_dir)
             check_call(['sudo', 'chmod', '-R', 'a+rX', d])
-            copytree(d, os.path.join(backup, data_dir))
+            copytree(d, os.path.join(backup, data_dir), symlinks=True)
 
     def restore(self, backup):
         """See :ref:`wam app-restore`.
@@ -710,7 +711,7 @@ class App:
             self._logger.info('Restoring data directory %s', data_dir)
             path = os.path.join(self.path, data_dir)
             trash(path)
-            copytree(os.path.join(backup, data_dir), path)
+            copytree(os.path.join(backup, data_dir), path, symlinks=True)
         self._set_data_dirs()
 #        for data_dir in self.data_dirs:
 #            root = os.path.join(backup, data_dir)
