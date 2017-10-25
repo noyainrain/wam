@@ -2,8 +2,10 @@ download: https://github.com/NoyaInRain/meetling.git
 stack:
     - python3
     - nodejs
+packages:
+    pip: []
 databases:
     - redis
 jobs:
     - python3 -m meetling --url={app.url} --redis-url={app.databases[redis].name} --port {app.port}
-hook: make deps
+hook: npm -C client update --only=prod --no-optional --no-save
