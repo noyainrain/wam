@@ -40,6 +40,13 @@ class WamTestCase(TestCase):
             app = self.manager.add(software_id, id)
             yield app
 
+def update_software_meta(app, meta={}):
+    # XXX what an ugly hack... please add a cool way to update software meta file
+    with open(app.software_id, 'w') as f:
+        f.write(json.dumps(meta))
+    del app.manager.meta._cache[app.software_id]
+    app._software_meta = None
+
 def process_exists(pid):
     try:
         os.kill(pid, 0)
@@ -169,11 +176,7 @@ class AppTest(WamTestCase):
 
     def test_update_data_dirs_changed(self):
         with self.tmp_app({'data_dirs': ['a', 'b']}) as app:
-            with open(app.software_id, 'w') as f:
-                f.write('{"data_dirs": ["b", "c"]}')
-            # XXX what an ugly hack... please add a cool way to update software meta file
-            del self.manager.meta._cache[app.software_id]
-            app._software_meta = None
+            update_software_meta(app, {'data_dirs': ['b', 'c']})
 
             data_dirs = {'b', 'c'}
             app.update()
@@ -249,6 +252,11 @@ class AppUpdateCodeTest(WamTestCase):
     def test_update_code(self):
         with self.tmp_app({'download': self.remote}) as app:
             self.assertTrue(os.path.isfile(os.path.join(app.path, 'wam.py')))
+
+    def test_update_code_url(self):
+        with self.tmp_app({'download': self.remote}) as app:
+            update_software_meta(app, {'download': '.'})
+            app.update()
 
     def test_update_code_branch(self):
         with self.tmp_app({'download': self.remote}) as app:

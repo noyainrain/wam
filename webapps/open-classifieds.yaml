@@ -21,4 +21,6 @@ hook: |
         echo "* Site Configuration > Admin Password: ***"
     else
         chmod o-w . install oc/config themes
+        echo "Open {app.url}/oc-panel/update/database?from_version=VERSION, where VERSION is"
+        echo "the pre-update version."
     fi

@@ -528,9 +528,13 @@ class App:
         else:
             self._logger.info('Pulling from %s', url)
             try:
+                origin_url = check_output(['git', '-C', repo, 'config', '--get', 'remote.origin.url']).decode().strip()
+                if url != origin_url:
+                    check_call(['git', '-C', repo, 'remote', 'set-url', 'origin', url])
                 # If we are not on a branch (e.g. checked out a tag), FETCH_HEAD is needed
                 check_call(['git', '-C', repo, 'fetch', 'origin', branch])
                 check_call(['git', '-C', repo, 'checkout', 'FETCH_HEAD'])
+                check_call(['git', '-C', repo, 'submodule', 'sync'])
                 check_call(['git', '-C', repo, 'submodule', 'update', '--recursive'])
             except CalledProcessError:
                 raise OSError('git')
@@ -549,7 +553,7 @@ class App:
                 check_call(['git', 'clone', '--single-branch', '--branch=v0.3.9',
                             'https://github.com/postmodern/chruby.git'], cwd='/tmp')
                 check_call(['sudo', 'make', 'install'], cwd='/tmp/chruby')
-            check_call(['sudo', 'ruby-install', '--no-reinstall', 'ruby'])
+            check_call(['sudo', 'ruby-install', '--latest', '--no-reinstall', 'ruby'])
             check_call(['sudo', 'bash', '-c', '. /usr/local/share/chruby/chruby.sh && chruby ruby && gem install bundler'])
 
         alias = {
@@ -1217,6 +1221,8 @@ class Redis(DatabaseEngine):
         self.get_redis_databases = get_redis_databases
 
     def setup(self):
+        # FIXME: Fails for Python apps that install redis-py as dependency. We should check
+        # explicitly if the server is installed.
         try:
             import redis
         except ImportError:
@@ -1240,6 +1246,7 @@ class Redis(DatabaseEngine):
         r = StrictRedis()
         r.save()
         # XXX: compatibility with non systemd, remove again
+        # FIXME: /var/lib/redis is not readable and accessable
         check_call(['sudo', 'chmod', 'o+r', '/var/lib/redis/dump.rdb'])
         copyfile('/var/lib/redis/dump.rdb', os.path.join(path, self.dump_name))
 
