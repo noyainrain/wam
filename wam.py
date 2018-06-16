@@ -277,7 +277,6 @@ class WebAppManager:
 
         # Get TLS certificate
         if self.config['certbot']:
-            self.nginx.configure(tmp_host=app.url.host)
             check_call(['sudo', 'certbot', 'certonly', '-n', '--nginx', '-d', app.url.host])
 
         self.apps[app.id] = app
@@ -996,7 +995,7 @@ class Nginx:
         self.manager = manager
         self.config_path = config_path
 
-    def configure(self, tmp_host=None):
+    def configure(self):
         servers = []
 
         apps = sorted(self.manager.apps.values(), key=lambda a: (a.url.host, a.url.path))
@@ -1022,15 +1021,10 @@ class Nginx:
             servers.append(_NGINX_SERVER_TEMPLATE.format(host=host, locations=locations,
                                                          more=more or ''))
 
-        if tmp_host:
-            servers.append('server {{ server_name {host}; }}'.format(host=tmp_host))
-
         with open(self.config_path, 'w') as f:
             f.write(_NGINX_TEMPLATE.format(config='\n'.join(servers)))
 
-        # XXX: compatibility with non systemd, remove again
         check_call(['sudo', 'service', 'nginx', 'reload'])
-        #check_call(['sudo', 'systemctl', 'reload', 'nginx'])
 
 class PackageEngine:
     # TODO: maybe packages should either be packages or a path to the app.....
