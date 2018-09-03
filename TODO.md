@@ -1,7 +1,17 @@
-wam! ToDos
-==========
+# wam! ToDos
 
 ## Issues
+
+* Make it possible to install apps under a subpath
+
+  Useful for debugging e.g. path resolution: `error_log /var/log/nginx/debug.log debug;`
+
+* Only keep n backups
+
+* Convert data_dirs to data_paths to enable files
+
+  For Owncloud, add `data/ownloud.db`, so only database (but not files) will be included in regular
+  backups.
 
 * Implement update of repository URLs
 
@@ -40,3 +50,10 @@ wam! ToDos
 
 * watch: data dirs owner conflicts with update (git reset does not have priviliges to change
   those directories)
+
+* Complex plugins
+
+  Maybe not as plugins, but include in hook (e.g. git clone/fetch/checkout plus call of make etc)
+
+  * contacts: make
+  * calendar: sudo npm install -g yarn && make
