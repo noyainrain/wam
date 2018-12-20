@@ -107,6 +107,7 @@ _NGINX_PHPFPM_TEMPLATE = """\
         fastcgi_param PATH_INFO $path_info;
         include fastcgi_params;
         fastcgi_pass unix:/var/run/php5-fpm.sock;
+        #fastcgi_pass unix:/var/run/php/php7.0-fpm.sock;
     }}
 """
 
@@ -559,10 +560,14 @@ class App:
             'nodejs': ['nodejs'],
             'php5': ['php5-fpm', 'php5-gd', 'php5-curl', 'php5-mcrypt', 'php5-mysqlnd',
                      'php5-sqlite'],
-            'python3': ['python3-pip']
+            'php': ['php-fpm', 'php-gd', 'php-curl', 'php-mcrypt', 'php-mysqlnd', 'php-sqlite3'],
+            'python3': ['python3-pip', 'python3-venv']
         }
         packages = set(chain.from_iterable(alias[s] for s in self.meta['stack'] if s in alias))
         self.install('apt', packages)
+
+        if 'python3' in self.meta['stack']:
+            check_call(['python3', '-m', 'venv', os.path.join(self.path, '.venv')])
 
     def _update_packages(self):
         # TODO: Skip already installed packages
@@ -759,7 +764,9 @@ class App:
     def start_job(self, cmd, env={}, cwd=None):
         # TODO use self._script(cmd, job_user=True)
         if 'ruby' in self.meta['stack']:
-            args =  ['bash', '-c', '. /usr/local/share/chruby/chruby.sh && chruby ruby && GEM_HOME=$GEM_ROOT exec ' + cmd]
+            args = ['bash', '-c', '. /usr/local/share/chruby/chruby.sh && chruby ruby && GEM_HOME=$GEM_ROOT exec ' + cmd]
+        elif 'python3' in self.meta['stack']:
+            args = ['bash', '-c', '. .venv/bin/activate && ' + cmd]
         else:
             args = shlex.split(cmd)
         args = ['sudo', '-u', self.job_user, 'nohup'] + args
@@ -824,6 +831,8 @@ class App:
         script = script.format(app=self, wam=self.manager)
         if 'ruby' in self.meta['stack']:
             script = '. /usr/local/share/chruby/chruby.sh\nchruby ruby\nexport GEM_HOME=$GEM_ROOT\n' + script
+        if 'python3' in self.meta['stack']:
+            script = '. .venv/bin/activate\n' + script
         p.communicate(script.encode('utf-8'))
         if p.returncode:
             raise ScriptError()
@@ -1046,8 +1055,8 @@ class Apt(PackageEngine):
 class Pip(PackageEngine):
     def install(self, packages, app_path):
         args = list(packages) if packages else ['-r', os.path.join(app_path, 'requirements.txt')]
-        # NOTE: Should we use venv?
-        check_call(['sudo', 'pip3', 'install', '-U'] + args)
+        args = ' '.join(args)
+        check_call(['bash', '-c', '. {}/.venv/bin/activate && pip3 install -U {}'.format(app_path, args)])
 
 class Bundler(PackageEngine):
     def install(self, packages, app_path):

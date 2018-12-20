@@ -31,8 +31,8 @@ files:
         serve_static_files = true
         developer_emails = {wam.config[email]}
 jobs:
-    - bundle exec rails server -e production -b localhost -p {app.port}
-    - bundle exec sidekiq -q critical -q default -q low -e production
+    - env RAILS_ENV=production bundle exec rails server -b localhost -p {app.port}
+    - env RAILS_ENV=production bundle exec sidekiq -q critical -q default -q low
 hook: |
     psql -d {app.databases[postgresql].name} -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
     psql -d {app.databases[postgresql].name} -c "CREATE EXTENSION IF NOT EXISTS hstore;"

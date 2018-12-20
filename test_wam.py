@@ -349,17 +349,18 @@ class AptTest(TestCase):
 
 class PipTest(TestCase):
     def setUp(self):
+        self.app_path = mktemp()
+        os.mkdir(self.app_path)
+        check_call(['python3', '-m', 'venv', os.path.join(self.app_path, '.venv')])
         self.pip = Pip()
 
     def test_install(self):
-        self.pip.install({'simplejson'}, '/tmp')
+        self.pip.install({'simplejson'}, self.app_path)
 
     def test_install_auto(self):
-        app_path = mktemp()
-        os.mkdir(app_path)
         copyfile(os.path.join(RES_PATH, 'requirements.txt'),
-                 os.path.join(app_path, 'requirements.txt'))
-        self.pip.install({}, app_path)
+                 os.path.join(self.app_path, 'requirements.txt'))
+        self.pip.install({}, self.app_path)
 
 class BundlerTest(TestCase):
     def test_install(self):

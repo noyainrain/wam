@@ -8,4 +8,4 @@ databases:
     - redis
 jobs:
     - python3 -m listling --port={app.port} --url={app.url} --redis-url={app.databases[redis].name}
-hook: npm -C client update --only=prod --no-optional --no-save
+hook: make deps #npm -C client update --only=prod --no-optional --no-save
