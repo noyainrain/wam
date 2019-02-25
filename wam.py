@@ -106,8 +106,8 @@ _NGINX_PHPFPM_TEMPLATE = """\
         set $path_info $fastcgi_path_info;
         fastcgi_param PATH_INFO $path_info;
         include fastcgi_params;
-        fastcgi_pass unix:/var/run/php5-fpm.sock;
-        #fastcgi_pass unix:/var/run/php/php7.0-fpm.sock;
+        #fastcgi_pass unix:/var/run/php5-fpm.sock;
+        fastcgi_pass unix:/var/run/php/php7.0-fpm.sock;
     }}
 """
 
@@ -560,7 +560,8 @@ class App:
             'nodejs': ['nodejs'],
             'php5': ['php5-fpm', 'php5-gd', 'php5-curl', 'php5-mcrypt', 'php5-mysqlnd',
                      'php5-sqlite'],
-            'php': ['php-fpm', 'php-gd', 'php-curl', 'php-mcrypt', 'php-mysqlnd', 'php-sqlite3'],
+            'php': ['php-fpm', 'php-cli', 'php-gd', 'php-curl', 'php-intl', 'php-mbstring',
+                    'php-mcrypt', 'php-mysqlnd', 'php-sqlite3', 'php-xml', 'php-zip'],
             'python3': ['python3-pip', 'python3-venv']
         }
         packages = set(chain.from_iterable(alias[s] for s in self.meta['stack'] if s in alias))
