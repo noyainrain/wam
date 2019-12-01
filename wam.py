@@ -61,6 +61,8 @@ _NGINX_PROXY_TEMPLATE = """\
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
         proxy_pass http://localhost:{app.port};
     }}
 """
@@ -106,8 +108,7 @@ _NGINX_PHPFPM_TEMPLATE = """\
         set $path_info $fastcgi_path_info;
         fastcgi_param PATH_INFO $path_info;
         include fastcgi_params;
-        #fastcgi_pass unix:/var/run/php5-fpm.sock;
-        fastcgi_pass unix:/var/run/php/php7.0-fpm.sock;
+        fastcgi_pass unix:/var/run/php/php7.3-fpm.sock;
     }}
 """
 
@@ -557,11 +558,11 @@ class App:
             check_call(['sudo', 'bash', '-c', '. /usr/local/share/chruby/chruby.sh && chruby ruby && gem install bundler'])
 
         alias = {
-            'nodejs': ['nodejs'],
+            'nodejs': ['npm'],
             'php5': ['php5-fpm', 'php5-gd', 'php5-curl', 'php5-mcrypt', 'php5-mysqlnd',
                      'php5-sqlite'],
             'php': ['php-fpm', 'php-cli', 'php-gd', 'php-curl', 'php-intl', 'php-mbstring',
-                    'php-mcrypt', 'php-mysqlnd', 'php-sqlite3', 'php-xml', 'php-zip'],
+                    'php-mysql', 'php-sqlite3', 'php-xml', 'php-zip'],
             'python3': ['python3-pip', 'python3-venv']
         }
         packages = set(chain.from_iterable(alias[s] for s in self.meta['stack'] if s in alias))
@@ -1197,7 +1198,7 @@ class MySQL(SQLDatabaseEngine):
             check_call([
                 'sudo', 'sh', '-c',
                 'echo mysql-server mysql-server/root_password_again password {} | debconf-set-selections'.format(pw)])
-            Apt().install({'mysql-server', 'python3-mysql.connector'}, None)
+            Apt().install({'default-mysql-server', 'python3-mysql.connector'}, None)
             with open(os.path.expanduser('~/.my.cnf'), 'w') as f:
                 f.write(_MYSQL_CNF_TEMPLATE.format(pw=pw))
 

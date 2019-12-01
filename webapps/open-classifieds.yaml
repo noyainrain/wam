@@ -1,6 +1,6 @@
 download: https://github.com/open-classifieds/openclassifieds2.git
 mode: phpfpm
-stack: php5
+stack: php
 databases:
     - mysql
 data_dirs:
@@ -24,3 +24,7 @@ hook: |
         echo "Open {app.url}/oc-panel/update/database?from_version=VERSION, where VERSION is"
         echo "the pre-update version."
     fi
+    # Before updating:
+    # - Ensure you are logged in
+    # - git checkout -- oc/banned_domains.json oc/config/versions.php
+    # - sudo chown www-data:www-data oc/banned_domains.json oc/config/versions.php
