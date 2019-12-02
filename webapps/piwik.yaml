@@ -1,6 +1,6 @@
 download: https://github.com/piwik/piwik.git
 mode: phpfpm
-stack: php5
+stack: php
 databases:
     - mysql
 data_dirs:
