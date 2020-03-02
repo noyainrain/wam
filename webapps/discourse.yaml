@@ -2,6 +2,7 @@ download: https://github.com/discourse/discourse.git#beta
 stack: ruby
 packages:
     apt:
+        - brotli
         - postgresql-contrib
         - libpq-dev
         - libxml2
@@ -12,13 +13,16 @@ databases:
     - postgresql
     - redis
 data_dirs:
+    - app/assets/javascripts/plugins
     - log
+    - plugins/discourse-internet-explorer/public
     - public/assets
     - public/backups
     - public/images
     - public/plugins
     - public/uploads
     - tmp
+    - vendor/data
 files:
     config/discourse.conf: |
         db_host = localhost
