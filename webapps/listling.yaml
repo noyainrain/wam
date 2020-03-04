@@ -6,6 +6,8 @@ packages:
     pip: []
 databases:
     - redis
+data_dirs:
+    - data
 jobs:
     - python3 -m listling --port={app.port} --url={app.url} --redis-url={app.databases[redis].name}
 hook: make deps #npm -C client update --only=prod --no-optional --no-save
